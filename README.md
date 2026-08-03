@@ -47,4 +47,6 @@ Every command traces the syscalls it makes:
 `d_create`, `p_fork` and `color` are implemented. The other 12 show up in `help` marked
 `○` and are yours to write — each one tells you which file and which syscalls it needs.
 
+`color` has its own page: [docs/color.md](docs/color.md).
+
 MIT.
