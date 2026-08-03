@@ -39,7 +39,7 @@ const Command commands[] = {
       "Create a file and write text into it.",
       "open(2) · write(2) · close(2)",
       "cat_data.c",
-      NULL },
+      cmd_d_create },                      /* <- IMPLEMENTED */
 
     { "d_read", "data",
       "d_read <file>",

@@ -84,7 +84,7 @@ int parse_line(char *line, char **argv, int max_args);
  */
 
 /* --- data (cat_data.c) --- */
-/* int cmd_d_create(int argc, char **argv); */ /* open, write, close                 */
+int cmd_d_create(int argc, char **argv);   /* open(2), write(2), close(2)       DONE */
 /* int cmd_d_read (int argc, char **argv); */  /* open, read, close                  */
 /* int cmd_d_info (int argc, char **argv); */  /* stat                               */
 /* int cmd_d_copy (int argc, char **argv); */  /* open, read, write, close           */
