@@ -90,7 +90,7 @@ const Command commands[] = {
       "Spawn a child process and wait for its exit code.",
       "fork(2) · getpid(2) · getppid(2) · waitpid(2)",
       "cat_process.c",
-      NULL },
+      cmd_p_fork },                        /* <- IMPLEMENTED */
 
     { "p_exec", "process",
       "p_exec <command> [args...]",

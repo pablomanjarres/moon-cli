@@ -95,7 +95,7 @@ int cmd_d_create(int argc, char **argv);   /* open(2), write(2), close(2)       
 /* int cmd_m_info(int argc, char **argv); */   /* /proc/self/status                  */
 
 /* --- process (cat_process.c) --- */
-/* int cmd_p_fork(int argc, char **argv); */   /* fork, getpid, getppid, waitpid     */
+int cmd_p_fork(int argc, char **argv);     /* fork, getpid, getppid, waitpid    DONE */
 /* int cmd_p_exec   (int argc, char **argv); */ /* fork, execvp, waitpid             */
 /* int cmd_p_kill   (int argc, char **argv); */ /* kill                              */
 /* int cmd_p_monitor(int argc, char **argv); */ /* getrusage                         */
