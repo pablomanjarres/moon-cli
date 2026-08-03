@@ -1,0 +1,10 @@
+# binary and object files
+moon
+*.o
+
+# scratch files the commands create (d_create, d_copy...)
+*.txt
+
+# local notes / tooling
+tasks/
+.claude/
