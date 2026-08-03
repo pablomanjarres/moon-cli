@@ -23,6 +23,8 @@
 
 #include "shell.h"
 
+#include <limits.h>   /* INT_MAX, for bounds-checking the flag index */
+
 /* Uncomment what you need once you start:
  *
  * #include <unistd.h>   // getuid
@@ -114,10 +116,15 @@ static int parse_flag(const char *flag, int *index, const NamedColor **color,
         return 0;
     }
 
-    /* whatever follows the last dash has to be a plain number */
+    /* Whatever follows the last dash has to be a plain, sane number.
+     *
+     * The INT_MAX check is not paranoia: strtol hands back a long, and casting a
+     * long that big to int wraps around to a NEGATIVE number. That negative index
+     * would sail past the "is it past the end of the text?" test below and write
+     * outside the array. Catch it here instead. */
     char *end;
     long n = strtol(dash + 1, &end, 10);
-    if (*end != '\0' || n < 0) {
+    if (*end != '\0' || n < 0 || n > INT_MAX) {
         *why = "that is not a valid letter number";
         return 0;
     }
@@ -178,7 +185,8 @@ int cmd_color(int argc, char **argv)
         if (index >= len) {
             ui_fail("'%s' points at letter %d, but \"%s\" only has %d.",
                     argv[a], index, text, len);
-            ui_hint("letters count from 0, so the last one here is %d.", len - 1);
+            if (len > 0)   /* empty text has no "last letter" to point at */
+                ui_hint("letters count from 0, so the last one here is %d.", len - 1);
             return 1;
         }
 
