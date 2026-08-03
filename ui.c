@@ -68,6 +68,33 @@ const char *ui_c(UiColor c)
 int ui_has_color(void) { return g_color; }
 
 /**
+ * Any 24-bit color, built on the fly.
+ *
+ * The string has to survive until printf reads it, so it cannot be a local. We keep
+ * a small rotating set of buffers instead of a single static one: that way a printf
+ * with several ui_rgb() arguments still works, because each call lands in a
+ * different slot. Four is plenty; past that the oldest one gets reused.
+ */
+const char *ui_rgb(int r, int g, int b)
+{
+    static char bufs[4][32];
+    static int slot = 0;
+
+    if (!g_color) return "";
+
+    if (r < 0)   r = 0;
+    if (r > 255) r = 255;
+    if (g < 0)   g = 0;
+    if (g > 255) g = 255;
+    if (b < 0)   b = 0;
+    if (b > 255) b = 255;
+
+    slot = (slot + 1) % 4;
+    snprintf(bufs[slot], sizeof(bufs[slot]), "\033[38;2;%d;%d;%dm", r, g, b);
+    return bufs[slot];
+}
+
+/**
  * Decide whether we paint color at all:
  *  - MOON_FORCE_COLOR=1  -> always yes (handy for `./moon | less -R` or for tests)
  *  - NO_COLOR present    -> always no  (the https://no-color.org convention)

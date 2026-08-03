@@ -30,6 +30,7 @@ Needs Linux, `gcc` and `make`. Nothing else.
 moon ~/moon-cli ❯ help                     list every command
 moon ~/moon-cli ❯ d_create hi.txt "hey"    create a file
 moon ~/moon-cli ❯ p_fork                   spawn a child process
+moon ~/moon-cli ❯ color pablo -red-0       one color per letter
 moon ~/moon-cli ❯ exit                     quit (Ctrl+D also works)
 ```
 
@@ -43,7 +44,9 @@ Every command traces the syscalls it makes:
   └ ✔  'hi.txt' created with 3 bytes.
 ```
 
-`d_create` and `p_fork` are implemented. The other 12 show up in `help` marked `○` and
-are yours to write — each one tells you which file and which syscalls it needs.
+`d_create`, `p_fork` and `color` are implemented. The other 12 show up in `help` marked
+`○` and are yours to write — each one tells you which file and which syscalls it needs.
+
+`color` has its own page: [docs/color.md](docs/color.md).
 
 MIT.

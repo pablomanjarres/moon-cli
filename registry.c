@@ -114,6 +114,13 @@ const Command commands[] = {
       NULL },
 
     /* --- util -------------------------------------------------------------------- */
+    { "color", "util",
+      "color <text> [-<color>-<index>]",
+      "Print text with one color per letter.",
+      "write(2), through printf",
+      "cat_util.c",
+      cmd_color },                         /* <- IMPLEMENTED */
+
     { "greet", "util",
       "greet",
       "Greet the current user by reading their UID.",

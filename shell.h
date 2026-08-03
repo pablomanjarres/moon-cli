@@ -101,6 +101,7 @@ int cmd_p_fork(int argc, char **argv);     /* fork, getpid, getppid, waitpid    
 /* int cmd_p_monitor(int argc, char **argv); */ /* getrusage                         */
 
 /* --- util (cat_util.c) --- */
+int cmd_color(int argc, char **argv);          /* write(2), through printf     DONE */
 /* int cmd_greet(int argc, char **argv); */    /* getuid, getpwuid                   */
 /* int cmd_time (int argc, char **argv); */    /* time                               */
 /* int cmd_date (int argc, char **argv); */    /* time                               */
