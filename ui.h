@@ -48,6 +48,10 @@ typedef enum {
 /* Returns the ANSI sequence for a color, or "" when color is disabled. */
 const char *ui_c(UiColor c);
 
+/* Same thing for an arbitrary 24-bit color, e.g. ui_rgb(255, 0, 0) for red.
+ * Values outside 0..255 get clamped. Safe to use up to 4 times in one printf. */
+const char *ui_rgb(int r, int g, int b);
+
 /* Shorthands so printf stays readable: printf("%sHi%s\n", C_BRAND, C_OFF); */
 #define C_OFF     ui_c(UI_OFF)
 #define C_BRAND   ui_c(UI_G3)
