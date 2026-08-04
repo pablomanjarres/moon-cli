@@ -115,7 +115,7 @@ const Command commands[] = {
 
     /* --- util -------------------------------------------------------------------- */
     { "color", "util",
-      "color <text> [--<color>-<index>]",
+      "color <text> [--<color>=<index>]",
       "Print text with one color per letter.",
       "write(2), through printf",
       "cat_util.c",
