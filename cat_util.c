@@ -33,15 +33,15 @@
  */
 
 /* ====================================================================================
- * color <text> [-<color>-<index>]...
+ * color <text> [--<color>-<index>]...
  * ====================================================================================
  * Prints the text with one color per letter.
  *
- *   color pablo                  every letter a different color (rainbow, cycling)
- *   color pablo -red-0           ...except letter 0, forced to red
- *   color pablo -red-0 -gold-4   as many overrides as you want
+ *   color pablo                    every letter a different color (rainbow, cycling)
+ *   color pablo --red-0            ...except letter 0, forced to red
+ *   color pablo --red-0 --gold-4   as many overrides as you want
  *
- * Indexes start at 0, so -red-0 is the first letter.
+ * Indexes start at 0, so --red-0 is the first letter.
  *
  * Underneath this is just write(2): printf pushes bytes into file descriptor 1
  * (stdout), and some of those bytes are ANSI escape sequences that the terminal
@@ -96,7 +96,11 @@ static void list_colors(void)
 }
 
 /**
- * Takes one flag like "-red-0" apart.
+ * Takes one flag like "--red-0" apart.
+ *
+ * Two dashes, on purpose: the usual convention is that a single dash introduces
+ * one-letter flags (-v, -l) and a double dash introduces long, spelled-out ones
+ * (--verbose, --red-0).
  *
  * Returns 1 when it parsed, 0 when the shape is wrong (and then *why says what for).
  * On success *index gets the letter position and *color points at the palette row.
@@ -105,14 +109,18 @@ static int parse_flag(const char *flag, int *index, const NamedColor **color,
                       const char **why)
 {
     if (flag[0] != '-') {
-        *why = "a flag has to start with '-'";
+        *why = "a flag has to start with '--'";
+        return 0;
+    }
+    if (flag[1] != '-') {
+        *why = "flags take two dashes, like --red-0";
         return 0;
     }
 
-    const char *body = flag + 1;              /* "red-0"                  */
+    const char *body = flag + 2;              /* "red-0"                  */
     const char *dash = strrchr(body, '-');    /* the LAST dash splits it  */
     if (dash == NULL || dash == body || dash[1] == '\0') {
-        *why = "write it as -<color>-<number>, for example -red-0";
+        *why = "write it as --<color>-<number>, for example --red-0";
         return 0;
     }
 
@@ -148,7 +156,7 @@ int cmd_color(int argc, char **argv)
 {
     if (argc < 2) {
         registry_usage("color");
-        ui_hint("example: %scolor pablo -red-0%s", C_ACCENT, C_OFF);
+        ui_hint("example: %scolor pablo --red-0%s", C_ACCENT, C_OFF);
         list_colors();
         return 1;
     }
@@ -178,7 +186,7 @@ int cmd_color(int argc, char **argv)
 
         if (!parse_flag(argv[a], &index, &c, &why)) {
             ui_fail("Bad flag '%s': %s.", argv[a], why);
-            ui_hint("usage: %scolor <text> [-<color>-<index>]%s", C_ACCENT, C_OFF);
+            ui_hint("usage: %scolor <text> [--<color>-<index>]%s", C_ACCENT, C_OFF);
             list_colors();
             return 1;
         }
