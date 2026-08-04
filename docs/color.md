@@ -3,33 +3,37 @@
 Prints text with one color per letter.
 
 ```
-color <text> [--<color>-<index>]...
+color <text> [--<color>=<index>]...
 ```
 
 ## Examples
 
 ```
 color pablo                    rainbow, a different color per letter
-color pablo --red-0            ...but letter 0 is forced to red
-color pablo --pink-0 --gold-4  as many overrides as you want
-color "hello world" --cyan-6   quote it if it has spaces
+color pablo --red=0            ...but letter 0 is forced to red
+color pablo --pink=0 --gold=4  as many overrides as you want
+color "hello world" --cyan=6   quote it if it has spaces
 ```
 
-Letters count from **0**, so `--red-0` is the first letter and `--red-4` is the fifth.
+Letters count from **0**, so `--red=0` is the first letter and `--red=4` is the fifth.
 
 ## Flags
 
-A flag is `--` + a color name + `-` + a letter number. Nothing else.
+A flag is `--` + a color name + `=` + a letter number. Nothing else.
 
 Two dashes because that is the usual convention: a single dash introduces one-letter
-flags (`-v`, `-l`), a double dash introduces long spelled-out ones (`--verbose`).
+flags (`-v`, `-l`), a double dash introduces long spelled-out ones (`--verbose`). The
+`=` is how a long option normally carries a value (`--jobs=4`).
+
+A dash works too — `--red-0` does the same thing as `--red=0` — but `=` is the form
+these docs use.
 
 Without flags every letter follows the rainbow cycle, which repeats every 7 letters.
 A flag replaces the color of exactly one letter. If two flags point at the same
 letter, the last one wins.
 
-> Heads up: the rainbow already starts on red, so `--red-0` looks like it does
-> nothing. Try `--pink-0` or `--moon-0` to see the override clearly.
+> Heads up: the rainbow already starts on red, so `--red=0` looks like it does
+> nothing. Try `--pink=0` or `--moon=0` to see the override clearly.
 
 ## Colors
 
@@ -52,12 +56,13 @@ immediately — the parser and the error messages read that same table.
 | you typed | what you get |
 |---|---|
 | `color` | wrong usage, plus the color list |
-| `color pablo --mauve-0` | `I do not know that color` |
-| `color pablo --red` | `write it as --<color>-<number>` |
+| `color pablo --mauve=0` | `I do not know that color` |
+| `color pablo --red` | `write it as --<color>=<number>` |
+| `color pablo --red=` | same — the number is missing |
 | `color pablo red-0` | `a flag has to start with '--'` |
-| `color pablo -red-0` | `flags take two dashes, like --red-0` |
-| `color pablo --red-0x` | `that is not a valid letter number` |
-| `color pablo --red-99` | `points at letter 99, but "pablo" only has 5` |
+| `color pablo -red=0` | `flags take two dashes, like --red=0` |
+| `color pablo --red=0x` | `that is not a valid letter number` |
+| `color pablo --red=99` | `points at letter 99, but "pablo" only has 5` |
 
 ## Limits
 
