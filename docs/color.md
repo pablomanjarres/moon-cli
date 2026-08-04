@@ -19,7 +19,7 @@ Letters count from **0**, so `--red=0` is the first letter and `--red=4` is the 
 
 ## Flags
 
-A flag is `--` + a color name + `=` + a letter number. Nothing else.
+A flag is `--` + a color name + `=` + a letter number, with nothing in between.
 
 Two dashes because that is the usual convention: a single dash introduces one-letter
 flags (`-v`, `-l`), a double dash introduces long spelled-out ones (`--verbose`). The
