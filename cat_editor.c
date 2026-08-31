@@ -115,7 +115,11 @@ static int ed_append(const char *text)
         if (lseek(ed_fd, end - 1, SEEK_SET) == -1) { perror("lseek"); return 1; }
         ssize_t got = read(ed_fd, &last, 1);
         if (got == -1) { perror("read"); return 1; }
-        if (got == 1 && last != '\n' && ed_write("\n", 1) == -1) return 1;
+        if (got != 1) {
+            if (lseek(ed_fd, 0, SEEK_END) == -1) { perror("lseek"); return 1; }
+        } else if (last != '\n' && ed_write("\n", 1) == -1) {
+            return 1;
+        }
     }
 
     if (ed_write(text, strlen(text)) == -1) return 1;
@@ -266,6 +270,7 @@ static int ed_open(const char *path)
 int cmd_edit(int argc, char **argv)
 {
     char line[2048];
+    int status = 0;
 
     (void)argc;
     (void)argv;
@@ -291,21 +296,22 @@ int cmd_edit(int argc, char **argv)
         }
 
         if (strcmp(cmd, "q") == 0) break;
-        if (strcmp(cmd, "o") == 0) { ed_open(arg); continue; }
+        if (strcmp(cmd, "o") == 0) { status = ed_open(arg); continue; }
 
         if (ed_fd == -1) {
             printf("  %sno file open%s  use: o <file>\n", C_WARN, C_OFF);
+            status = 1;
             continue;
         }
 
-        if (strcmp(cmd, "p") == 0) ed_print(arg);
-        else if (strcmp(cmd, "a") == 0) ed_append(arg);
-        else if (strcmp(cmd, "d") == 0) ed_delete(arg);
-        else if (strcmp(cmd, "i") == 0) ed_insert(arg);
-        else if (strcmp(cmd, "s") == 0) ed_search(arg);
-        else printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF);
+        if (strcmp(cmd, "p") == 0) status = ed_print(arg);
+        else if (strcmp(cmd, "a") == 0) status = ed_append(arg);
+        else if (strcmp(cmd, "d") == 0) status = ed_delete(arg);
+        else if (strcmp(cmd, "i") == 0) status = ed_insert(arg);
+        else if (strcmp(cmd, "s") == 0) status = ed_search(arg);
+        else { printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF); status = 1; }
     }
 
     ed_close();
-    return 0;
+    return status;
 }
