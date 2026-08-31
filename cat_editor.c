@@ -160,6 +160,54 @@ static int ed_delete(const char *arg)
     return rc;
 }
 
+static int ed_insert(char *arg)
+{
+    if (!arg || !*arg) {
+        printf("  usage: i <n> <text>\n");
+        return 1;
+    }
+
+    char *text = arg;
+    while (*text && *text != ' ' && *text != '\t') text++;
+    if (*text) {
+        *text++ = '\0';
+        while (*text == ' ' || *text == '\t') text++;
+    }
+
+    int n = atoi(arg);
+    if (n < 1) {
+        printf("  usage: i <n> <text>\n");
+        return 1;
+    }
+
+    size_t len;
+    char *buf = ed_slurp(&len);
+    if (!buf) return 1;
+
+    size_t ll;
+    char *l = ed_line(buf, len, n, &ll);
+    size_t at = l ? (size_t)(l - buf) : len;
+
+    size_t tl = strlen(text);
+    char *nb = malloc(len + tl + 2);
+    if (!nb) { perror("malloc"); free(buf); return 1; }
+
+    size_t p = 0;
+    memcpy(nb, buf, at);
+    p = at;
+    if (p && nb[p - 1] != '\n') nb[p++] = '\n';
+    memcpy(nb + p, text, tl);
+    p += tl;
+    nb[p++] = '\n';
+    memcpy(nb + p, buf + at, len - at);
+    p += len - at;
+
+    int rc = ed_save(nb, p) == -1;
+    free(buf);
+    free(nb);
+    return rc;
+}
+
 static int ed_open(const char *path)
 {
     if (!path || !*path) {
@@ -219,6 +267,7 @@ int cmd_edit(int argc, char **argv)
         if (strcmp(cmd, "p") == 0) ed_print(arg);
         else if (strcmp(cmd, "a") == 0) ed_append(arg);
         else if (strcmp(cmd, "d") == 0) ed_delete(arg);
+        else if (strcmp(cmd, "i") == 0) ed_insert(arg);
         else printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF);
     }
 
