@@ -94,6 +94,36 @@ static int ed_print(const char *arg)
     return rc;
 }
 
+static int ed_write(const char *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(ed_fd, buf + off, len - off);
+        if (n == -1) { perror("write"); return -1; }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int ed_append(const char *text)
+{
+    if (!text) text = "";
+
+    off_t end = lseek(ed_fd, 0, SEEK_END);
+    if (end == -1) { perror("lseek"); return 1; }
+
+    if (end > 0) {
+        char last;
+        if (lseek(ed_fd, end - 1, SEEK_SET) == -1) { perror("lseek"); return 1; }
+        if (read(ed_fd, &last, 1) == -1) { perror("read"); return 1; }
+        if (last != '\n' && ed_write("\n", 1) == -1) return 1;
+    }
+
+    if (ed_write(text, strlen(text)) == -1) return 1;
+    if (ed_write("\n", 1) == -1) return 1;
+    return 0;
+}
+
 static int ed_open(const char *path)
 {
     if (!path || !*path) {
@@ -151,6 +181,7 @@ int cmd_edit(int argc, char **argv)
         }
 
         if (strcmp(cmd, "p") == 0) ed_print(arg);
+        else if (strcmp(cmd, "a") == 0) ed_append(arg);
         else printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF);
     }
 
