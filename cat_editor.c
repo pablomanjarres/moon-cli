@@ -115,8 +115,9 @@ static int ed_append(const char *text)
     if (end > 0) {
         char last;
         if (lseek(ed_fd, end - 1, SEEK_SET) == -1) { perror("lseek"); return 1; }
-        if (read(ed_fd, &last, 1) == -1) { perror("read"); return 1; }
-        if (last != '\n' && ed_write("\n", 1) == -1) return 1;
+        ssize_t got = read(ed_fd, &last, 1);
+        if (got == -1) { perror("read"); return 1; }
+        if (got == 1 && last != '\n' && ed_write("\n", 1) == -1) return 1;
     }
 
     if (ed_write(text, strlen(text)) == -1) return 1;
