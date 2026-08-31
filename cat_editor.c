@@ -208,6 +208,43 @@ static int ed_insert(char *arg)
     return rc;
 }
 
+static int ed_search(const char *word)
+{
+    if (!word || !*word) {
+        printf("  usage: s <word>\n");
+        return 1;
+    }
+
+    size_t len;
+    char *buf = ed_slurp(&len);
+    if (!buf) return 1;
+
+    int hits = 0;
+    size_t i = 0;
+    int n = 1;
+
+    while (i < len) {
+        size_t j = i;
+        while (j < len && buf[j] != '\n') j++;
+
+        char save = buf[j];
+        buf[j] = '\0';
+        if (strstr(buf + i, word)) {
+            printf("  %s%d%s  %s\n", C_ACCENT, n, C_OFF, buf + i);
+            hits++;
+        }
+        buf[j] = save;
+
+        i = j + 1;
+        n++;
+    }
+
+    if (!hits) printf("  %snot found%s\n", C_MUTED, C_OFF);
+
+    free(buf);
+    return hits ? 0 : 1;
+}
+
 static int ed_open(const char *path)
 {
     if (!path || !*path) {
@@ -268,6 +305,7 @@ int cmd_edit(int argc, char **argv)
         else if (strcmp(cmd, "a") == 0) ed_append(arg);
         else if (strcmp(cmd, "d") == 0) ed_delete(arg);
         else if (strcmp(cmd, "i") == 0) ed_insert(arg);
+        else if (strcmp(cmd, "s") == 0) ed_search(arg);
         else printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF);
     }
 
