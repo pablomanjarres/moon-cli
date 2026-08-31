@@ -5,18 +5,21 @@ cd "$(dirname "$0")/.."
 make >/dev/null
 
 F=$(mktemp)
-trap 'rm -f "$F"' EXIT
+trap 'rm -f "$F" "$F.want"' EXIT
 
 run() { printf '%s\nq\nexit\n' "$1" | ./moon >/dev/null 2>&1; }
 check() {
-    if [ "$(cat "$F")" = "$(printf '%b' "$2")" ]; then
+    printf '%b' "$2" > "$F.want"
+    if cmp -s "$F" "$F.want"; then
         echo "  ok   $1"
     else
         echo "  FAIL $1"
-        echo "       want: $(printf '%b' "$2" | tr '\n' '/')"
+        echo "       want: $(tr '\n' '/' < "$F.want")"
         echo "       got:  $(tr '\n' '/' < "$F")"
+        rm -f "$F.want"
         exit 1
     fi
+    rm -f "$F.want"
 }
 
 rm -f "$F"
@@ -30,33 +33,35 @@ o $F
 a one
 a two
 a three"
-check "a appends" 'one\ntwo\nthree'
+check "a appends" 'one\ntwo\nthree\n'
 
 run "edit
 o $F
 d 2"
-check "d deletes the middle line" 'one\nthree'
+check "d deletes the middle line" 'one\nthree\n'
 
 run "edit
 o $F
 d 2"
-check "d deletes the last line" 'one'
+check "d deletes the last line" 'one\n'
 
 run "edit
 o $F
 i 1 zero"
-check "i inserts at the top" 'zero\none'
+check "i inserts at the top" 'zero\none\n'
 
 run "edit
 o $F
 i 99 last"
-check "i past the end appends" 'zero\none\nlast'
+check "i past the end appends" 'zero\none\nlast\n'
 
-printf 'edit\no %s\np 2\nq\nexit\n' "$F" | ./moon 2>&1 | grep -q one \
+printf 'edit\no %s\np 2\nq\nexit\n' "$F" | ./moon 2>&1 \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -qE '❯ one$' \
     && echo "  ok   p prints one line" \
     || { echo "  FAIL p prints one line"; exit 1; }
 
-printf 'edit\no %s\ns last\nq\nexit\n' "$F" | ./moon 2>&1 | grep -q "3" \
+printf 'edit\no %s\ns last\nq\nexit\n' "$F" | ./moon 2>&1 \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -qE '3 +last$' \
     && echo "  ok   s finds the line number" \
     || { echo "  FAIL s finds the line number"; exit 1; }
 
@@ -76,7 +81,7 @@ printf 'no-newline' > "$F"
 run "edit
 o $F
 a added"
-check "a fixes a missing trailing newline" 'no-newline\nadded'
+check "a fixes a missing trailing newline" 'no-newline\nadded\n'
 
 echo
 echo "  all passed"
