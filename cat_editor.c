@@ -4,15 +4,13 @@
 #include <unistd.h>
 #include <errno.h>
 
-static int  ed_fd = -1;
-static char ed_path[512];
+static int ed_fd = -1;
 
 static void ed_close(void)
 {
     if (ed_fd == -1) return;
     if (close(ed_fd) == -1) perror("close");
     ed_fd = -1;
-    ed_path[0] = '\0';
 }
 
 static char *ed_slurp(size_t *len)
@@ -253,16 +251,14 @@ static int ed_open(const char *path)
         return 1;
     }
 
-    ed_close();
-
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd == -1) {
         perror("open");
         return 1;
     }
 
+    ed_close();
     ed_fd = fd;
-    snprintf(ed_path, sizeof ed_path, "%s", path);
     printf("  %s%s%s  fd %d\n", C_BRAND, path, C_OFF, fd);
     return 0;
 }
