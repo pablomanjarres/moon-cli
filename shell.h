@@ -19,6 +19,7 @@
  *   cat_memory.c    memory commands    (sbrk, mmap...)
  *   cat_process.c   process commands   (fork, exec, kill, getrusage...)
  *   cat_util.c      small utilities    (greet, time, date...)
+ *   cat_editor.c    the text editor    (open, read, write, lseek, ftruncate)
  */
 
 #include <stdio.h>
@@ -99,6 +100,9 @@ int cmd_p_fork(int argc, char **argv);     /* fork, getpid, getppid, waitpid    
 /* int cmd_p_exec   (int argc, char **argv); */ /* fork, execvp, waitpid             */
 /* int cmd_p_kill   (int argc, char **argv); */ /* kill                              */
 /* int cmd_p_monitor(int argc, char **argv); */ /* getrusage                         */
+
+/* --- editor (cat_editor.c) --- */
+int cmd_edit(int argc, char **argv);       /* open, read, write, lseek, ftruncate, close */
 
 /* --- util (cat_util.c) --- */
 int cmd_color(int argc, char **argv);          /* write(2), through printf     DONE */
