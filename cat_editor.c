@@ -279,7 +279,14 @@ int cmd_edit(int argc, char **argv)
         printf("  %sed%s %s ", C_BRAND, C_OFF, ICON_PROMPT);
         fflush(stdout);
 
-        if (!fgets(line, sizeof line, stdin)) break;
+        if (!fgets(line, sizeof line, stdin)) {
+            if (ferror(stdin) && errno == EINTR) {
+                clearerr(stdin);
+                printf("\n");
+                continue;
+            }
+            break;
+        }
 
         char *nl = strchr(line, '\n');
         if (nl) *nl = '\0';
