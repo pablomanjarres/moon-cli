@@ -8,3 +8,6 @@ moon
 # local notes / tooling
 tasks/
 .claude/
+
+# private course material (never commit)
+.private/

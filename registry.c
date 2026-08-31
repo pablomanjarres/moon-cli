@@ -22,6 +22,7 @@ const Category categories[] = {
     { "memory",  "Process memory",     "sbrk · mmap · /proc"            },
     { "process", "Processes & signals", "fork · exec · kill · getrusage" },
     { "util",    "Utilities",          "getuid · time"                  },
+    { "editor",  "Text editor",        "open · read · write · lseek · ftruncate" },
 };
 const int num_categories = (int)(sizeof(categories) / sizeof(categories[0]));
 
@@ -141,6 +142,14 @@ const Command commands[] = {
       "time(2)",
       "cat_util.c",
       NULL },
+
+    /* --- editor ------------------------------------------------------------------ */
+    { "edit", "editor",
+      "edit",
+      "Open the line editor (o p a d i s q).",
+      "open(2) · read(2) · write(2) · lseek(2) · ftruncate(2) · close(2)",
+      "cat_editor.c",
+      cmd_edit },                          /* <- IMPLEMENTED */
 };
 const int num_commands = (int)(sizeof(commands) / sizeof(commands[0]));
 
