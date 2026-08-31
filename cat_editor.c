@@ -124,6 +124,42 @@ static int ed_append(const char *text)
     return 0;
 }
 
+static int ed_save(const char *buf, size_t len)
+{
+    if (lseek(ed_fd, 0, SEEK_SET) == -1) { perror("lseek"); return -1; }
+    if (ed_write(buf, len) == -1) return -1;
+    if (ftruncate(ed_fd, (off_t)len) == -1) { perror("ftruncate"); return -1; }
+    return 0;
+}
+
+static int ed_delete(const char *arg)
+{
+    if (!arg || !*arg) {
+        printf("  usage: d <n>\n");
+        return 1;
+    }
+
+    size_t len;
+    char *buf = ed_slurp(&len);
+    if (!buf) return 1;
+
+    size_t ll;
+    char *l = ed_line(buf, len, atoi(arg), &ll);
+    if (!l) {
+        printf("  %sno such line%s\n", C_WARN, C_OFF);
+        free(buf);
+        return 1;
+    }
+
+    size_t cut = ll + (l + ll < buf + len ? 1 : 0);
+    size_t head = (size_t)(l - buf);
+    memmove(l, l + cut, len - head - cut);
+
+    int rc = ed_save(buf, len - cut) == -1;
+    free(buf);
+    return rc;
+}
+
 static int ed_open(const char *path)
 {
     if (!path || !*path) {
@@ -182,6 +218,7 @@ int cmd_edit(int argc, char **argv)
 
         if (strcmp(cmd, "p") == 0) ed_print(arg);
         else if (strcmp(cmd, "a") == 0) ed_append(arg);
+        else if (strcmp(cmd, "d") == 0) ed_delete(arg);
         else printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF);
     }
 
