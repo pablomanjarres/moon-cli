@@ -73,6 +73,11 @@ printf 'edit\no /nope/nothing.txt\nq\nexit\n' | ./moon 2>&1 | grep -q "No such f
     && echo "  ok   open failure calls perror" \
     || { echo "  FAIL open failure calls perror"; exit 1; }
 
+printf 'edit\no %s\no /nope/x.txt\np 1\nq\nexit\n' "$F" | ./moon 2>&1 \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -qE '❯ zero$' \
+    && echo "  ok   a failed o keeps the current file" \
+    || { echo "  FAIL a failed o keeps the current file"; exit 1; }
+
 printf 'edit\np\nq\nexit\n' | ./moon 2>&1 | grep -q "no file open" \
     && echo "  ok   commands refuse without an open file" \
     || { echo "  FAIL commands refuse without an open file"; exit 1; }
