@@ -15,6 +15,27 @@ static void ed_close(void)
     ed_path[0] = '\0';
 }
 
+static int ed_open(const char *path)
+{
+    if (!path || !*path) {
+        printf("  usage: o <file>\n");
+        return 1;
+    }
+
+    ed_close();
+
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    if (fd == -1) {
+        perror("open");
+        return 1;
+    }
+
+    ed_fd = fd;
+    snprintf(ed_path, sizeof ed_path, "%s", path);
+    printf("  %s%s%s  fd %d\n", C_BRAND, path, C_OFF, fd);
+    return 0;
+}
+
 int cmd_edit(int argc, char **argv)
 {
     char line[2048];
@@ -43,6 +64,12 @@ int cmd_edit(int argc, char **argv)
         }
 
         if (strcmp(cmd, "q") == 0) break;
+        if (strcmp(cmd, "o") == 0) { ed_open(arg); continue; }
+
+        if (ed_fd == -1) {
+            printf("  %sno file open%s  use: o <file>\n", C_WARN, C_OFF);
+            continue;
+        }
 
         printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF);
     }
