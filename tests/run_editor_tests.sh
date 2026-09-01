@@ -88,5 +88,23 @@ o $F
 a added"
 check "a fixes a missing trailing newline" 'no-newline\nadded\n'
 
+vis() { python3 tests/visual_driver.py "$F" "$1" >/dev/null 2>&1; }
+
+printf 'alpha\nbeta\n' > "$F"
+vis '\x1b[B|\x1b[C\x1b[C\x1b[C\x1b[C|!!|\x0f'
+check "visual types at the cursor and ^O saves" 'alpha\nbeta!!\n'
+
+printf 'alpha\nbeta\n' > "$F"
+vis '\x1b[B|\x1b[C\x1b[C\x1b[C\x1b[C|\r|gamma|\x0f'
+check "visual splits a line with Enter" 'alpha\nbeta\ngamma\n'
+
+printf 'alpha\nbeta\n' > "$F"
+vis '\x1b[B|\x1b[C\x1b[C\x1b[C\x1b[C|\x7f\x7f|\x0f'
+check "visual backspace deletes characters" 'alpha\nbe\n'
+
+printf 'alpha\nbeta\n' > "$F"
+vis '\x1b[B|zzz'
+check "visual without ^O leaves the file untouched" 'alpha\nbeta\n'
+
 echo
 echo "  all passed"
