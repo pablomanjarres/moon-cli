@@ -145,8 +145,8 @@ const Command commands[] = {
 
     /* --- editor ------------------------------------------------------------------ */
     { "edit", "editor",
-      "edit [-v] [file]",
-      "Line editor (o p a d i s q); -v or v opens the full-screen mode.",
+      "edit [file]",
+      "Full-screen text editor. Without a file: line mode (o p a d i s q).",
       "open(2) · read(2) · write(2) · lseek(2) · ftruncate(2) · close(2) · tcsetattr(3)",
       "cat_editor.c",
       cmd_edit },                          /* <- IMPLEMENTED */

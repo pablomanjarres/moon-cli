@@ -582,18 +582,12 @@ int cmd_edit(int argc, char **argv)
     char path[sizeof line] = "";
     int status = 0;
 
-    if (argc >= 2 && strcmp(argv[1], "-v") == 0) {
-        if (argc < 3) { printf("  usage: edit -v <file>\n"); return 1; }
-        if (ed_open(argv[2]) != 0) return 1;
-        snprintf(path, sizeof path, "%s", argv[2]);
-        status = ed_visual(path);
-        ed_close();
-        return status;
-    }
-
     if (argc >= 2) {
         if (ed_open(argv[1]) != 0) return 1;
         snprintf(path, sizeof path, "%s", argv[1]);
+        status = ed_visual(path);
+        ed_close();
+        return status;
     }
 
     for (;;) {
@@ -642,7 +636,11 @@ int cmd_edit(int argc, char **argv)
         else if (strcmp(cmd, "d") == 0) status = ed_delete(arg);
         else if (strcmp(cmd, "i") == 0) status = ed_insert(arg);
         else if (strcmp(cmd, "s") == 0) status = ed_search(arg);
-        else { printf("  %s?%s o p a d i s v q\n", C_MUTED, C_OFF); status = 1; }
+        else {
+            printf("  %s'%s' is not a command.%s Try %sa %s%s, or %sv%s for the full-screen editor.\n",
+                   C_WARN, cmd, C_OFF, C_BRAND, cmd, C_OFF, C_BRAND, C_OFF);
+            status = 1;
+        }
     }
 
     ed_close();
