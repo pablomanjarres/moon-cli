@@ -579,7 +579,7 @@ static int ed_open(const char *path)
 int cmd_edit(int argc, char **argv)
 {
     char line[2048];
-    char path[512] = "";
+    char path[sizeof line] = "";
     int status = 0;
 
     if (argc >= 2 && strcmp(argv[1], "-v") == 0) {
