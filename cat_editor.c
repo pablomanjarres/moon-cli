@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <termios.h>
+#include <sys/ioctl.h>
 
 static int ed_fd = -1;
 
@@ -248,6 +250,313 @@ static int ed_search(const char *word)
     return hits ? 0 : 1;
 }
 
+
+typedef struct {
+    char **line;
+    int    count;
+    int    cap;
+} Doc;
+
+static struct termios ed_saved_term;
+static int ed_raw = 0;
+
+static int ed_raw_on(void)
+{
+    if (tcgetattr(0, &ed_saved_term) == -1) { perror("tcgetattr"); return -1; }
+
+    struct termios t = ed_saved_term;
+    t.c_lflag &= (tcflag_t)~(ECHO | ICANON | ISIG | IEXTEN);
+    t.c_iflag &= (tcflag_t)~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
+    t.c_oflag &= (tcflag_t)~(OPOST);
+    t.c_cc[VMIN] = 1;
+    t.c_cc[VTIME] = 0;
+
+    if (tcsetattr(0, TCSAFLUSH, &t) == -1) { perror("tcsetattr"); return -1; }
+    ed_raw = 1;
+    return 0;
+}
+
+static void ed_raw_off(void)
+{
+    if (!ed_raw) return;
+    if (tcsetattr(0, TCSAFLUSH, &ed_saved_term) == -1) perror("tcsetattr");
+    ed_raw = 0;
+}
+
+static void doc_free(Doc *d)
+{
+    for (int i = 0; i < d->count; i++) free(d->line[i]);
+    free(d->line);
+    d->line = NULL;
+    d->count = d->cap = 0;
+}
+
+static int doc_push(Doc *d, const char *src, size_t n)
+{
+    if (d->count == d->cap) {
+        int cap = d->cap ? d->cap * 2 : 32;
+        char **nl = realloc(d->line, (size_t)cap * sizeof *nl);
+        if (!nl) { perror("realloc"); return -1; }
+        d->line = nl;
+        d->cap = cap;
+    }
+    char *copy = malloc(n + 1);
+    if (!copy) { perror("malloc"); return -1; }
+    memcpy(copy, src, n);
+    copy[n] = '\0';
+    d->line[d->count++] = copy;
+    return 0;
+}
+
+static int doc_load(Doc *d)
+{
+    size_t len;
+    char *buf = ed_slurp(&len);
+    if (!buf) return -1;
+
+    d->line = NULL; d->count = 0; d->cap = 0;
+
+    size_t i = 0;
+    while (i < len) {
+        size_t j = i;
+        while (j < len && buf[j] != '\n') j++;
+        if (doc_push(d, buf + i, j - i) == -1) { free(buf); doc_free(d); return -1; }
+        i = j + 1;
+    }
+    if (d->count == 0 && doc_push(d, "", 0) == -1) { free(buf); doc_free(d); return -1; }
+
+    free(buf);
+    return 0;
+}
+
+static int doc_store(Doc *d)
+{
+    size_t total = 0;
+    for (int i = 0; i < d->count; i++) total += strlen(d->line[i]) + 1;
+
+    char *buf = malloc(total ? total : 1);
+    if (!buf) { perror("malloc"); return -1; }
+
+    size_t p = 0;
+    for (int i = 0; i < d->count; i++) {
+        size_t n = strlen(d->line[i]);
+        memcpy(buf + p, d->line[i], n);
+        p += n;
+        buf[p++] = '\n';
+    }
+
+    int rc = ed_save(buf, p);
+    free(buf);
+    return rc;
+}
+
+
+typedef struct {
+    char  *buf;
+    size_t len;
+    size_t cap;
+} Screen;
+
+static void sc_add(Screen *s, const char *src, size_t n)
+{
+    if (s->len + n > s->cap) {
+        size_t cap = (s->cap ? s->cap : 4096);
+        while (cap < s->len + n) cap *= 2;
+        char *nb = realloc(s->buf, cap);
+        if (!nb) return;
+        s->buf = nb;
+        s->cap = cap;
+    }
+    memcpy(s->buf + s->len, src, n);
+    s->len += n;
+}
+
+static void sc_str(Screen *s, const char *t) { sc_add(s, t, strlen(t)); }
+
+static void ed_winsize(int *rows, int *cols)
+{
+    struct winsize ws;
+    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_row == 0) {
+        *rows = 24; *cols = 80;
+    } else {
+        *rows = ws.ws_row; *cols = ws.ws_col;
+    }
+}
+
+static void ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff, int dirty)
+{
+    int rows, cols;
+    ed_winsize(&rows, &cols);
+
+    int body = rows - 2;
+    Screen s = {NULL, 0, 0};
+    char tmp[256];
+
+    sc_str(&s, "\x1b[?25l\x1b[H\x1b[2J");
+
+    snprintf(tmp, sizeof tmp, "\x1b[7m %-*.*s \x1b[m\r\n", cols - 2, cols - 2, path);
+    sc_str(&s, tmp);
+
+    for (int y = 0; y < body; y++) {
+        int i = y + rowoff;
+        if (i < d->count) {
+            size_t n = strlen(d->line[i]);
+            if ((int)n > cols) n = (size_t)cols;
+            sc_add(&s, d->line[i], n);
+        } else {
+            sc_str(&s, "\x1b[38;2;107;126;168m~\x1b[m");
+        }
+        sc_str(&s, "\r\n");
+    }
+
+    snprintf(tmp, sizeof tmp,
+             "\x1b[7m %d/%d  %s \x1b[m\x1b[K  ^O save   ^X exit",
+             cy + 1, d->count, dirty ? "modified" : "saved");
+    sc_str(&s, tmp);
+
+    snprintf(tmp, sizeof tmp, "\x1b[%d;%dH\x1b[?25h", cy - rowoff + 2, cx + 1);
+    sc_str(&s, tmp);
+
+    if (s.len && write(1, s.buf, s.len) == -1) perror("write");
+    free(s.buf);
+}
+
+static int line_insert(Doc *d, int at, const char *src, size_t n)
+{
+    if (doc_push(d, "", 0) == -1) return -1;
+    for (int i = d->count - 1; i > at; i--) d->line[i] = d->line[i - 1];
+    char *copy = malloc(n + 1);
+    if (!copy) { perror("malloc"); return -1; }
+    memcpy(copy, src, n);
+    copy[n] = '\0';
+    d->line[at] = copy;
+    return 0;
+}
+
+static void line_remove(Doc *d, int at)
+{
+    free(d->line[at]);
+    for (int i = at; i < d->count - 1; i++) d->line[i] = d->line[i + 1];
+    d->count--;
+}
+
+static int line_set(Doc *d, int at, const char *src, size_t n)
+{
+    char *copy = malloc(n + 1);
+    if (!copy) { perror("malloc"); return -1; }
+    memcpy(copy, src, n);
+    copy[n] = '\0';
+    free(d->line[at]);
+    d->line[at] = copy;
+    return 0;
+}
+
+
+static int ed_visual(const char *path)
+{
+    Doc d;
+    if (doc_load(&d) == -1) return 1;
+    if (ed_raw_on() == -1) { doc_free(&d); return 1; }
+
+    int cy = 0, cx = 0, rowoff = 0, dirty = 0, rc = 0;
+
+    for (;;) {
+        int rows, cols;
+        ed_winsize(&rows, &cols);
+        int body = rows - 2;
+
+        if (cy < rowoff) rowoff = cy;
+        if (cy >= rowoff + body) rowoff = cy - body + 1;
+
+        ed_draw(&d, path, cy, cx, rowoff, dirty);
+
+        char c;
+        ssize_t n = read(0, &c, 1);
+        if (n == -1 && errno == EINTR) continue;
+        if (n != 1) break;
+
+        if (c == 24) break;
+
+        if (c == 15) {
+            if (doc_store(&d) == -1) { rc = 1; break; }
+            dirty = 0;
+            continue;
+        }
+
+        if (c == 27) {
+            char seq[2];
+            if (read(0, &seq[0], 1) != 1) continue;
+            if (read(0, &seq[1], 1) != 1) continue;
+            if (seq[0] != '[') continue;
+            if (seq[1] == 'A' && cy > 0) cy--;
+            else if (seq[1] == 'B' && cy < d.count - 1) cy++;
+            else if (seq[1] == 'C') cx++;
+            else if (seq[1] == 'D' && cx > 0) cx--;
+            int ll = (int)strlen(d.line[cy]);
+            if (cx > ll) cx = ll;
+            continue;
+        }
+
+        if (c == '\r' || c == '\n') {
+            char *cur = d.line[cy];
+            size_t ll = strlen(cur);
+            if ((size_t)cx > ll) cx = (int)ll;
+            if (line_insert(&d, cy + 1, cur + cx, ll - (size_t)cx) == -1) { rc = 1; break; }
+            if (line_set(&d, cy, cur, (size_t)cx) == -1) { rc = 1; break; }
+            cy++; cx = 0; dirty = 1;
+            continue;
+        }
+
+        if (c == 127 || c == 8) {
+            char *cur = d.line[cy];
+            size_t ll = strlen(cur);
+            if (cx > 0) {
+                char *nb = malloc(ll);
+                if (!nb) { perror("malloc"); rc = 1; break; }
+                memcpy(nb, cur, (size_t)cx - 1);
+                memcpy(nb + cx - 1, cur + cx, ll - (size_t)cx);
+                int ok = line_set(&d, cy, nb, ll - 1);
+                free(nb);
+                if (ok == -1) { rc = 1; break; }
+                cx--;
+            } else if (cy > 0) {
+                size_t pl = strlen(d.line[cy - 1]);
+                char *nb = malloc(pl + ll + 1);
+                if (!nb) { perror("malloc"); rc = 1; break; }
+                memcpy(nb, d.line[cy - 1], pl);
+                memcpy(nb + pl, cur, ll);
+                int ok = line_set(&d, cy - 1, nb, pl + ll);
+                free(nb);
+                if (ok == -1) { rc = 1; break; }
+                line_remove(&d, cy);
+                cy--; cx = (int)pl;
+            }
+            dirty = 1;
+            continue;
+        }
+
+        if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
+            char *cur = d.line[cy];
+            size_t ll = strlen(cur);
+            if ((size_t)cx > ll) cx = (int)ll;
+            char *nb = malloc(ll + 2);
+            if (!nb) { perror("malloc"); rc = 1; break; }
+            memcpy(nb, cur, (size_t)cx);
+            nb[cx] = c;
+            memcpy(nb + cx + 1, cur + cx, ll - (size_t)cx);
+            int ok = line_set(&d, cy, nb, ll + 1);
+            free(nb);
+            if (ok == -1) { rc = 1; break; }
+            cx++; dirty = 1;
+        }
+    }
+
+    ed_raw_off();
+    if (write(1, "\x1b[2J\x1b[H", 7) == -1) perror("write");
+    doc_free(&d);
+    return rc;
+}
+
 static int ed_open(const char *path)
 {
     if (!path || !*path) {
@@ -270,10 +579,22 @@ static int ed_open(const char *path)
 int cmd_edit(int argc, char **argv)
 {
     char line[2048];
+    char path[512] = "";
     int status = 0;
 
-    (void)argc;
-    (void)argv;
+    if (argc >= 2 && strcmp(argv[1], "-v") == 0) {
+        if (argc < 3) { printf("  usage: edit -v <file>\n"); return 1; }
+        if (ed_open(argv[2]) != 0) return 1;
+        snprintf(path, sizeof path, "%s", argv[2]);
+        status = ed_visual(path);
+        ed_close();
+        return status;
+    }
+
+    if (argc >= 2) {
+        if (ed_open(argv[1]) != 0) return 1;
+        snprintf(path, sizeof path, "%s", argv[1]);
+    }
 
     for (;;) {
         printf("  %sed%s %s ", C_BRAND, C_OFF, ICON_PROMPT);
@@ -303,7 +624,11 @@ int cmd_edit(int argc, char **argv)
         }
 
         if (strcmp(cmd, "q") == 0) break;
-        if (strcmp(cmd, "o") == 0) { status = ed_open(arg); continue; }
+        if (strcmp(cmd, "o") == 0) {
+            status = ed_open(arg);
+            if (status == 0) snprintf(path, sizeof path, "%s", arg);
+            continue;
+        }
 
         if (ed_fd == -1) {
             printf("  %sno file open%s  use: o <file>\n", C_WARN, C_OFF);
@@ -311,12 +636,13 @@ int cmd_edit(int argc, char **argv)
             continue;
         }
 
-        if (strcmp(cmd, "p") == 0) status = ed_print(arg);
+        if (strcmp(cmd, "v") == 0) status = ed_visual(path);
+        else if (strcmp(cmd, "p") == 0) status = ed_print(arg);
         else if (strcmp(cmd, "a") == 0) status = ed_append(arg);
         else if (strcmp(cmd, "d") == 0) status = ed_delete(arg);
         else if (strcmp(cmd, "i") == 0) status = ed_insert(arg);
         else if (strcmp(cmd, "s") == 0) status = ed_search(arg);
-        else { printf("  %s?%s o p a d i s q\n", C_MUTED, C_OFF); status = 1; }
+        else { printf("  %s?%s o p a d i s v q\n", C_MUTED, C_OFF); status = 1; }
     }
 
     ed_close();
