@@ -23,7 +23,7 @@ def drain(t=0.4):
 
 
 drain(0.8)
-os.write(fd, b"edit -v " + F.encode() + b"\n")
+os.write(fd, b"edit " + F.encode() + b"\n")
 time.sleep(0.6)
 drain(0.4)
 
