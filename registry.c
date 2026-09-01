@@ -22,7 +22,7 @@ const Category categories[] = {
     { "memory",  "Process memory",     "sbrk · mmap · /proc"            },
     { "process", "Processes & signals", "fork · exec · kill · getrusage" },
     { "util",    "Utilities",          "getuid · time"                  },
-    { "editor",  "Text editor",        "open · read · write · lseek · ftruncate" },
+    { "editor",  "Text editor",        "open · read · write · lseek · ftruncate · termios" },
 };
 const int num_categories = (int)(sizeof(categories) / sizeof(categories[0]));
 
@@ -145,9 +145,9 @@ const Command commands[] = {
 
     /* --- editor ------------------------------------------------------------------ */
     { "edit", "editor",
-      "edit",
-      "Open the line editor (o p a d i s q).",
-      "open(2) · read(2) · write(2) · lseek(2) · ftruncate(2) · close(2)",
+      "edit [-v] [file]",
+      "Line editor (o p a d i s q); -v or v opens the full-screen mode.",
+      "open(2) · read(2) · write(2) · lseek(2) · ftruncate(2) · close(2) · tcsetattr(3)",
       "cat_editor.c",
       cmd_edit },                          /* <- IMPLEMENTED */
 };
