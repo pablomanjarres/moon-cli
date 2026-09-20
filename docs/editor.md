@@ -81,6 +81,11 @@ En Linux: `make && sh tests/run_editor_tests.sh`. El script comprueba los
 comandos de ambos niveles, fallos de apertura, archivos sin salto final y
 edición visual mediante una terminal seudográfica.
 
-Antes de entregar, falta anotar los aportes reales de cada integrante y que
-ambos revisen el texto. El enunciado también pide un PDF final y un video;
-este Markdown es la fuente del informe.
+## Reparto para la sustentación
+
+- Pablo: explica la integración con `moon` y demuestra los comandos.
+- Valentina: explica las pruebas, los errores y los límites.
+- Ambos: revisan este texto y participan en el video.
+
+Antes de entregar, falta anotar qué trabajo hizo cada integrante. El enunciado
+también pide un PDF final y un video; este Markdown es la fuente del informe.
