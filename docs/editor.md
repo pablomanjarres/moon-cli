@@ -1,7 +1,7 @@
 # Editor de texto en `moon`
 
-Trabajo de Sistemas Operativos para un equipo de dos personas. El código está en
-`cat_editor.c`; se entra desde el shell con `edit`.
+Trabajo de Sistemas Operativos de Pablo Manjarres y Valentina Barbosa. El código
+está en `cat_editor.c`; se entra desde el shell con `edit`.
 
 ## Uso
 
@@ -81,6 +81,12 @@ En Linux: `make && sh tests/run_editor_tests.sh`. El script comprueba los
 comandos de ambos niveles, fallos de apertura, archivos sin salto final y
 edición visual mediante una terminal seudográfica.
 
-Antes de entregar, faltan los nombres y aportes reales de cada integrante y
-la revisión del texto por ambos. El enunciado también pide un PDF final y un
-video; este Markdown es la fuente del informe.
+## Reparto para la sustentación
+
+- Pablo: explica la integración con `moon` y demuestra los comandos.
+- Valentina: explica las pruebas, los errores y los límites.
+- Ambos: revisan este texto y participan en el video.
+
+El PDF de una página se generó a partir de este texto y está en `.private/`
+en ambas máquinas. Antes de entregar, falta anotar qué trabajo hizo cada
+integrante, revisar el informe entre ambos y grabar el video.
