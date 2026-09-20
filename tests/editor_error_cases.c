@@ -10,13 +10,41 @@ static int inject_read_eintr;
 static int inject_write_eintr;
 static int inject_write_zero;
 static int inject_write_short;
+static int fail_malloc_once;
+static void *allocations[1024];
+static size_t allocation_count;
 static ssize_t checked_read(int fd, void *buf, size_t count);
 static ssize_t checked_write(int fd, const void *buf, size_t count);
+static void *tracked_malloc(size_t size);
+static void tracked_free(void *ptr);
 #define read checked_read
 #define write checked_write
+#define malloc tracked_malloc
+#define free tracked_free
 #include "../cat_editor.c"
 #undef read
 #undef write
+#undef malloc
+#undef free
+
+static void *tracked_malloc(size_t size)
+{
+    if (fail_malloc_once) { fail_malloc_once = 0; errno = ENOMEM; return NULL; }
+    void *ptr = malloc(size);
+    if (ptr) {
+        assert(allocation_count < sizeof allocations / sizeof allocations[0]);
+        allocations[allocation_count++] = ptr;
+    }
+    return ptr;
+}
+
+static void tracked_free(void *ptr)
+{
+    for (size_t i = 0; i < allocation_count; i++) {
+        if (allocations[i] == ptr) { allocations[i] = NULL; break; }
+    }
+    free(ptr);
+}
 
 static ssize_t checked_read(int fd, void *buf, size_t count)
 {
@@ -43,7 +71,7 @@ int main(void)
     inject_read_eintr = 1;
     char *contents = ed_slurp(&len);
     assert(contents && len == 5 && strcmp(contents, "alpha") == 0);
-    free(contents);
+    tracked_free(contents);
 
     assert(lseek(ed_fd, 0, SEEK_SET) == 0);
     inject_write_eintr = 1;
@@ -61,7 +89,11 @@ int main(void)
     assert(doc_push(&d, "last", 4) == 0);
     assert(line_insert(&d, 1, "middle", 6) == 0);
     assert(d.count == 3 && strcmp(d.line[1], "middle") == 0);
+    fail_malloc_once = 1;
+    assert(line_insert(&d, 1, "unused", 6) == -1);
+    assert(d.count == 3 && strcmp(d.line[1], "middle") == 0);
     doc_free(&d);
+    for (size_t i = 0; i < allocation_count; i++) assert(allocations[i] == NULL);
     puts("editor error cases passed");
     return 0;
 }
