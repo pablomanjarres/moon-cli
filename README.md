@@ -48,5 +48,6 @@ Every command traces the syscalls it makes:
 `○` and are yours to write — each one tells you which file and which syscalls it needs.
 
 `color` has its own page: [docs/color.md](docs/color.md).
+The text editor's design and commands are in [docs/editor.md](docs/editor.md).
 
 MIT.
