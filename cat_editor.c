@@ -3,16 +3,42 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdint.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 
 static int ed_fd = -1;
 
-static void ed_close(void)
+static ssize_t ed_read(int fd, void *buf, size_t len)
 {
-    if (ed_fd == -1) return;
-    if (close(ed_fd) == -1) perror("close");
+    ssize_t n;
+    do { n = read(fd, buf, len); } while (n == -1 && errno == EINTR);
+    return n;
+}
+
+static int ed_write_all(int fd, const char *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n == -1 && errno == EINTR) continue;
+        if (n <= 0) {
+            if (n == 0) errno = EIO;
+            perror("write");
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int ed_close(void)
+{
+    if (ed_fd == -1) return 0;
+    int rc = close(ed_fd);
+    if (rc == -1) perror("close");
     ed_fd = -1;
+    return rc;
 }
 
 static char *ed_slurp(size_t *len)
@@ -26,7 +52,7 @@ static char *ed_slurp(size_t *len)
 
     size_t got = 0;
     while (got < (size_t)end) {
-        ssize_t n = read(ed_fd, buf + got, (size_t)end - got);
+        ssize_t n = ed_read(ed_fd, buf + got, (size_t)end - got);
         if (n == -1) { perror("read"); free(buf); return NULL; }
         if (n == 0) break;
         got += (size_t)n;
@@ -39,13 +65,7 @@ static char *ed_slurp(size_t *len)
 
 static int ed_out(const char *buf, size_t len)
 {
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = write(1, buf + off, len - off);
-        if (n == -1) { perror("write"); return -1; }
-        off += (size_t)n;
-    }
-    return 0;
+    return ed_write_all(1, buf, len);
 }
 
 static char *ed_line(char *buf, size_t len, int n, size_t *out_len)
@@ -96,13 +116,7 @@ static int ed_print(const char *arg)
 
 static int ed_write(const char *buf, size_t len)
 {
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = write(ed_fd, buf + off, len - off);
-        if (n == -1) { perror("write"); return -1; }
-        off += (size_t)n;
-    }
-    return 0;
+    return ed_write_all(ed_fd, buf, len);
 }
 
 static int ed_append(const char *text)
@@ -115,7 +129,7 @@ static int ed_append(const char *text)
     if (end > 0) {
         char last;
         if (lseek(ed_fd, end - 1, SEEK_SET) == -1) { perror("lseek"); return 1; }
-        ssize_t got = read(ed_fd, &last, 1);
+        ssize_t got = ed_read(ed_fd, &last, 1);
         if (got == -1) { perror("read"); return 1; }
         if (got != 1) {
             if (lseek(ed_fd, 0, SEEK_END) == -1) { perror("lseek"); return 1; }
@@ -276,11 +290,15 @@ static int ed_raw_on(void)
     return 0;
 }
 
-static void ed_raw_off(void)
+static int ed_raw_off(void)
 {
-    if (!ed_raw) return;
-    if (tcsetattr(0, TCSAFLUSH, &ed_saved_term) == -1) perror("tcsetattr");
+    if (!ed_raw) return 0;
+    if (tcsetattr(0, TCSAFLUSH, &ed_saved_term) == -1) {
+        perror("tcsetattr");
+        return -1;
+    }
     ed_raw = 0;
+    return 0;
 }
 
 static void doc_free(Doc *d)
@@ -355,15 +373,21 @@ typedef struct {
     char  *buf;
     size_t len;
     size_t cap;
+    int failed;
 } Screen;
 
 static void sc_add(Screen *s, const char *src, size_t n)
 {
+    if (s->failed) return;
+    if (n > SIZE_MAX - s->len) { errno = ENOMEM; perror("realloc"); s->failed = 1; return; }
     if (s->len + n > s->cap) {
         size_t cap = (s->cap ? s->cap : 4096);
-        while (cap < s->len + n) cap *= 2;
+        while (cap < s->len + n) {
+            if (cap > SIZE_MAX / 2) { cap = s->len + n; break; }
+            cap *= 2;
+        }
         char *nb = realloc(s->buf, cap);
-        if (!nb) return;
+        if (!nb) { perror("realloc"); s->failed = 1; return; }
         s->buf = nb;
         s->cap = cap;
     }
@@ -383,13 +407,13 @@ static void ed_winsize(int *rows, int *cols)
     }
 }
 
-static void ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff, int dirty)
+static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff, int dirty)
 {
     int rows, cols;
     ed_winsize(&rows, &cols);
 
     int body = rows - 2;
-    Screen s = {NULL, 0, 0};
+    Screen s = {NULL, 0, 0, 0};
     char tmp[256];
 
     sc_str(&s, "\x1b[?25l\x1b[H\x1b[2J");
@@ -417,19 +441,27 @@ static void ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff, int di
     snprintf(tmp, sizeof tmp, "\x1b[%d;%dH\x1b[?25h", cy - rowoff + 2, cx + 1);
     sc_str(&s, tmp);
 
-    if (s.len && write(1, s.buf, s.len) == -1) perror("write");
+    int rc = s.failed ? -1 : ed_write_all(1, s.buf, s.len);
     free(s.buf);
+    return rc;
 }
 
 static int line_insert(Doc *d, int at, const char *src, size_t n)
 {
-    if (doc_push(d, "", 0) == -1) return -1;
-    for (int i = d->count - 1; i > at; i--) d->line[i] = d->line[i - 1];
     char *copy = malloc(n + 1);
     if (!copy) { perror("malloc"); return -1; }
     memcpy(copy, src, n);
     copy[n] = '\0';
+    if (d->count == d->cap) {
+        int cap = d->cap ? d->cap * 2 : 32;
+        char **nl = realloc(d->line, (size_t)cap * sizeof *nl);
+        if (!nl) { perror("realloc"); free(copy); return -1; }
+        d->line = nl;
+        d->cap = cap;
+    }
+    for (int i = d->count; i > at; i--) d->line[i] = d->line[i - 1];
     d->line[at] = copy;
+    d->count++;
     return 0;
 }
 
@@ -468,12 +500,12 @@ static int ed_visual(const char *path)
         if (cy < rowoff) rowoff = cy;
         if (cy >= rowoff + body) rowoff = cy - body + 1;
 
-        ed_draw(&d, path, cy, cx, rowoff, dirty);
+        if (ed_draw(&d, path, cy, cx, rowoff, dirty) == -1) { rc = 1; break; }
 
         char c;
-        ssize_t n = read(0, &c, 1);
-        if (n == -1 && errno == EINTR) continue;
-        if (n != 1) break;
+        ssize_t n = ed_read(0, &c, 1);
+        if (n == -1) { perror("read"); rc = 1; break; }
+        if (n == 0) break;
 
         if (c == 24) break;
 
@@ -485,8 +517,12 @@ static int ed_visual(const char *path)
 
         if (c == 27) {
             char seq[2];
-            if (read(0, &seq[0], 1) != 1) continue;
-            if (read(0, &seq[1], 1) != 1) continue;
+            n = ed_read(0, &seq[0], 1);
+            if (n == -1) { perror("read"); rc = 1; break; }
+            if (n != 1) break;
+            n = ed_read(0, &seq[1], 1);
+            if (n == -1) { perror("read"); rc = 1; break; }
+            if (n != 1) break;
             if (seq[0] != '[') continue;
             if (seq[1] == 'A' && cy > 0) cy--;
             else if (seq[1] == 'B' && cy < d.count - 1) cy++;
@@ -551,8 +587,8 @@ static int ed_visual(const char *path)
         }
     }
 
-    ed_raw_off();
-    if (write(1, "\x1b[2J\x1b[H", 7) == -1) perror("write");
+    if (ed_raw_off() == -1) rc = 1;
+    if (ed_write_all(1, "\x1b[2J\x1b[H", 7) == -1) rc = 1;
     doc_free(&d);
     return rc;
 }
@@ -570,7 +606,10 @@ static int ed_open(const char *path)
         return 1;
     }
 
-    ed_close();
+    if (ed_close() == -1) {
+        if (close(fd) == -1) perror("close");
+        return 1;
+    }
     ed_fd = fd;
     printf("  %s%s%s  fd %d\n", C_BRAND, path, C_OFF, fd);
     return 0;
@@ -586,7 +625,7 @@ int cmd_edit(int argc, char **argv)
         if (ed_open(argv[1]) != 0) return 1;
         snprintf(path, sizeof path, "%s", argv[1]);
         status = ed_visual(path);
-        ed_close();
+        if (ed_close() == -1) status = 1;
         return status;
     }
 
@@ -600,6 +639,7 @@ int cmd_edit(int argc, char **argv)
                 printf("\n");
                 continue;
             }
+            if (ferror(stdin)) { perror("fgets"); status = 1; }
             break;
         }
 
@@ -643,6 +683,6 @@ int cmd_edit(int argc, char **argv)
         }
     }
 
-    ed_close();
+    if (ed_close() == -1) status = 1;
     return status;
 }

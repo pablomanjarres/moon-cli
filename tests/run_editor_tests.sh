@@ -5,7 +5,8 @@ cd "$(dirname "$0")/.."
 make >/dev/null
 
 F=$(mktemp)
-trap 'rm -f "$F" "$F.want"' EXIT
+T=$(mktemp)
+trap 'rm -f "$F" "$F.want" "$T"' EXIT
 
 run() { printf '%s\nq\nexit\n' "$1" | ./moon >/dev/null 2>&1; }
 check() {
@@ -105,6 +106,10 @@ check "visual backspace deletes characters" 'alpha\nbe\n'
 printf 'alpha\nbeta\n' > "$F"
 vis '\x1b[B|zzz'
 check "visual without ^O leaves the file untouched" 'alpha\nbeta\n'
+
+${CC:-cc} -Wall -Wextra -std=gnu99 -D_GNU_SOURCE \
+    tests/editor_error_cases.c ui.c -o "$T"
+"$T" 2>/dev/null
 
 echo
 echo "  all passed"
