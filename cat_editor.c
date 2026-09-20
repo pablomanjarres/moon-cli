@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdint.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 
@@ -605,7 +606,10 @@ static int ed_open(const char *path)
         return 1;
     }
 
-    if (ed_close() == -1) { close(fd); return 1; }
+    if (ed_close() == -1) {
+        if (close(fd) == -1) perror("close");
+        return 1;
+    }
     ed_fd = fd;
     printf("  %s%s%s  fd %d\n", C_BRAND, path, C_OFF, fd);
     return 0;
