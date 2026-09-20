@@ -80,13 +80,3 @@ se guardan solo con `Ctrl+O`.
 En Linux: `make && sh tests/run_editor_tests.sh`. El script comprueba los
 comandos de ambos niveles, fallos de apertura, archivos sin salto final y
 edición visual mediante una terminal seudográfica.
-
-## Reparto para la sustentación
-
-- Pablo: explica la integración con `moon` y demuestra los comandos.
-- Valentina: explica las pruebas, los errores y los límites.
-- Ambos: revisan este texto y participan en el video.
-
-El PDF de una página se generó a partir de este texto y está en `.private/`
-en ambas máquinas. Antes de entregar, falta anotar qué trabajo hizo cada
-integrante, revisar el informe entre ambos y grabar el video.
