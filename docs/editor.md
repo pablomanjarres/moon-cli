@@ -87,5 +87,6 @@ edición visual mediante una terminal seudográfica.
 - Valentina: explica las pruebas, los errores y los límites.
 - Ambos: revisan este texto y participan en el video.
 
-Antes de entregar, falta anotar qué trabajo hizo cada integrante. El enunciado
-también pide un PDF final y un video; este Markdown es la fuente del informe.
+El PDF de una página se generó a partir de este texto y está en `.private/`
+en ambas máquinas. Antes de entregar, falta anotar qué trabajo hizo cada
+integrante, revisar el informe entre ambos y grabar el video.
