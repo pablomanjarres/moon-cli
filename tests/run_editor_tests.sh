@@ -107,9 +107,15 @@ printf 'alpha\nbeta\n' > "$F"
 vis '\x1b[B|zzz'
 check "visual without ^O leaves the file untouched" 'alpha\nbeta\n'
 
-${CC:-cc} -Wall -Wextra -std=gnu99 -D_GNU_SOURCE \
-    tests/editor_error_cases.c ui.c -o "$T"
-"$T" 2>/dev/null
+if [ "$(uname -s)" = Linux ]; then
+    ${CC:-cc} -Wall -Wextra -std=gnu99 -D_GNU_SOURCE -fsanitize=address -g \
+        tests/editor_error_cases.c ui.c -o "$T"
+    ASAN_OPTIONS=detect_leaks=1 "$T" 2>/dev/null
+else
+    ${CC:-cc} -Wall -Wextra -std=gnu99 -D_GNU_SOURCE \
+        tests/editor_error_cases.c ui.c -o "$T"
+    "$T" 2>/dev/null
+fi
 
 echo
 echo "  all passed"
