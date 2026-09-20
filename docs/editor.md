@@ -67,6 +67,10 @@ el documento permanece visible y se actualiza después de cada cambio.
 `tcgetattr` y `tcsetattr` permiten leer teclas una a una y restaurar el
 terminal al salir.
 
+En `ed_visual`, `Doc d` es una variable local en la pila (`stack`). El arreglo
+de punteros y las copias de las líneas se reservan en el `heap` con `malloc`
+y `realloc`, y se liberan con `free`.
+
 Se eligió cargar el texto en memoria porque simplifica las operaciones por
 línea. Editar solo en disco usaría menos RAM, pero complicaría mover la cola
 del archivo. Un índice de offsets evitaría releer todo para `p n`, pero
