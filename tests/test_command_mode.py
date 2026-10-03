@@ -64,7 +64,7 @@ class Session:
         # Each printable key causes a frame; do not accept a partial typed command.
         typed = ""
         for key in text:
-            typed += key
+            typed = typed[:-1] if key == "\x7f" else typed + key
             frame = check_layout(self.visual(key), width)
             assert typed[-min(16, width // 2):] in frame, "typed command is hidden"
         if exits:
@@ -123,6 +123,7 @@ def commands_from_visual(folder, width):
     session = Session(width)
     try:
         frame = session.visual(f"edit {file}\n")
+        assert not re.search(r"\bfd\s+\d+", ANSI.sub("", frame)), "open leaked raw descriptor"
         check_help(frame, width)
         text = check_layout(session.visual("\x0c"), width)
         session.raw()
@@ -133,7 +134,7 @@ def commands_from_visual(folder, width):
         printed = session.command("p 2", width)
         check_view(printed, file, ("alpha", "beta"))
         assert re.search(r"\b2\b[^\r\n]*beta", printed), "p 2 lost selected result"
-        text = session.command("a added", width)
+        text = session.command("a typo\x7f\x7f\x7f\x7fadded", width)
         assert file.read_bytes() == b"alpha\nbeta\nadded\n"
         check_view(text, file, ("alpha", "beta", "added"))
         text = session.command("i 2 inserted", width)
