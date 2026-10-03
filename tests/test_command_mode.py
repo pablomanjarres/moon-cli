@@ -107,9 +107,11 @@ def check_help(frame, width):
 
 
 def check_view(text, file, lines):
-    assert file.name in text.split("\r\n")[0], "file name disappeared from view"
-    for line in lines:
-        assert line in text.split("\r\n"), "document line disappeared: " + line
+    rows = text.split("\r\n")
+    assert file.name in rows[0], "file name disappeared from view"
+    for number, line in enumerate(lines, 1):
+        pattern = r"\s*" + str(number) + r"[ \t|│:]+" + re.escape(line) + r"\s*"
+        assert re.fullmatch(pattern, rows[number]), "numbered document line disappeared: " + line
     assert not re.search(r"\bfd\s+\d+", text), "raw descriptor leaked into UI"
 
 
