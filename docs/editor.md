@@ -6,7 +6,15 @@ está en `cat_editor.c`; se entra desde el shell con `edit`.
 ## Uso
 
 `edit` abre el modo de líneas. `edit archivo.txt` abre el mismo archivo en una
-vista de pantalla completa. En esa vista, `Ctrl+O` guarda y `Ctrl+X` sale.
+vista de pantalla completa. El pie muestra los siete comandos; `Ctrl+L` abre
+el modo de líneas con el mismo archivo. Si hay cambios sin guardar, primero
+se debe usar `Ctrl+O`: cambiar de modo no guarda ni descarta el texto.
+
+La ayuda aparece al entrar al modo de líneas y se puede repetir con `help`
+o `?`, incluso sin archivo abierto. `v` vuelve a la vista visual. Allí,
+`Ctrl+X` regresa al modo de líneas; `q` cierra el archivo y vuelve a `moon`.
+Si se entró directamente con `edit archivo.txt`, `Ctrl+X` vuelve a `moon`.
+`Ctrl+X` no guarda cambios.
 
 | Modo de líneas | Qué hace | Llamadas usadas |
 |---|---|---|
@@ -80,3 +88,5 @@ se guardan solo con `Ctrl+O`.
 En Linux: `make && sh tests/run_editor_tests.sh`. El script comprueba los
 comandos de ambos niveles, fallos de apertura, archivos sin salto final y
 edición visual mediante una terminal seudográfica.
+También verifica los comandos desde la vista visual, la protección del
+texto sin guardar y la restauración del terminal al cambiar de modo.
