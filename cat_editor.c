@@ -22,18 +22,22 @@ static int ed_out(const char *buf, size_t len);
 static void ed_report(const char *format, ...);
 static void ed_error(const char *name);
 
-enum { ED_COMMANDS = 2 };
+enum { ED_COMMANDS = 2, ED_VIEW, ED_QUIT };
+enum { ED_OPEN, ED_PRINT, ED_APPEND, ED_DELETE, ED_INSERT, ED_SEARCH, ED_CLOSE };
+
+static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *refresh);
 
 static const struct {
     const char *name, *args, *description;
+    int kind;
 } ed_commands[] = {
-    {"o", "file",   "open or create a file"},
-    {"p", "[n]",    "print all text or line n"},
-    {"a", "text",   "append a line"},
-    {"d", "n",      "delete line n"},
-    {"i", "n text", "insert a line at n"},
-    {"s", "word",   "find matching lines"},
-    {"q", "",       "close the file and return to moon"},
+    {"o", "file",   "open or create a file", ED_OPEN},
+    {"p", "[n]",    "print all text or line n", ED_PRINT},
+    {"a", "text",   "append a line", ED_APPEND},
+    {"d", "n",      "delete line n", ED_DELETE},
+    {"i", "n text", "insert a line at n", ED_INSERT},
+    {"s", "word",   "find matching lines", ED_SEARCH},
+    {"q", "",       "close the file and return to moon", ED_CLOSE},
 };
 
 static void ed_commands_text(char *buf, size_t len, int compact)
@@ -735,6 +739,60 @@ static int ed_open(const char *path)
     return 0;
 }
 
+static char *ed_parse_command(char *line, char **arg)
+{
+    char *nl = strchr(line, '\n');
+    if (nl) *nl = '\0';
+    while (*line == ' ' || *line == '\t') line++;
+    *arg = line;
+    while (**arg && **arg != ' ' && **arg != '\t') (*arg)++;
+    if (**arg) {
+        *(*arg)++ = '\0';
+        while (**arg == ' ' || **arg == '\t') (*arg)++;
+    }
+    return line;
+}
+
+static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *refresh)
+{
+    char *arg, *name = ed_parse_command(line, &arg);
+    *refresh = 0;
+    if (!*name) return 0;
+    if (strcmp(name, "help") == 0 || strcmp(name, "?") == 0) { ed_help(); return 0; }
+    int kind = -1;
+    for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++)
+        if (strcmp(name, ed_commands[i].name) == 0) kind = ed_commands[i].kind;
+    if (kind == ED_CLOSE) return ED_QUIT;
+    if (kind == -1 && strcmp(name, "v") != 0) {
+        ed_report("  unknown command: %s; use help\n", name);
+        return 1;
+    }
+    if (dirty && kind != -1) {
+        ed_report("save with ^O before file commands\n");
+        return 1;
+    }
+    if (kind == ED_OPEN) {
+        int rc = ed_open(arg);
+        if (!rc) { snprintf(path, path_size, "%s", arg); *refresh = 1; }
+        return rc;
+    }
+    if (ed_fd == -1) { ed_report("  no file open; use o <file>\n"); return 1; }
+    if (kind == -1) return ED_VIEW;
+    int rc;
+    switch (kind) {
+        case ED_PRINT: rc = ed_print(arg); break;
+        case ED_APPEND: rc = ed_append(arg); break;
+        case ED_DELETE: rc = ed_delete(arg); break;
+        case ED_INSERT: rc = ed_insert(arg); break;
+        default: rc = ed_search(arg); break;
+    }
+    if (!rc && (kind == ED_APPEND || kind == ED_DELETE || kind == ED_INSERT)) {
+        *refresh = 1;
+        ed_report("saved changes\n");
+    }
+    return rc;
+}
+
 int cmd_edit(int argc, char **argv)
 {
     char line[2048];
@@ -767,51 +825,12 @@ int cmd_edit(int argc, char **argv)
             break;
         }
 
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-
-        char *cmd = line;
-        while (*cmd == ' ' || *cmd == '\t') cmd++;
-        if (!*cmd) continue;
-
-        char *arg = cmd;
-        while (*arg && *arg != ' ' && *arg != '\t') arg++;
-        if (*arg) {
-            *arg++ = '\0';
-            while (*arg == ' ' || *arg == '\t') arg++;
-        }
-
-        if (strcmp(cmd, "q") == 0) break;
-        if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
-            ed_help();
-            status = 0;
-            continue;
-        }
-        if (strcmp(cmd, "o") == 0) {
-            status = ed_open(arg);
-            if (status == 0) snprintf(path, sizeof path, "%s", arg);
-            continue;
-        }
-
-        if (ed_fd == -1) {
-            printf("  %sno file open%s  use: o <file>\n", C_WARN, C_OFF);
-            status = 1;
-            continue;
-        }
-
-        if (strcmp(cmd, "v") == 0) {
+        int refresh;
+        status = ed_execute(line, path, sizeof path, 0, &refresh);
+        if (status == ED_QUIT) { status = 0; break; }
+        if (status == ED_VIEW) {
             status = ed_visual(path);
             if (status == ED_COMMANDS) { status = 0; ed_help(); }
-        }
-        else if (strcmp(cmd, "p") == 0) status = ed_print(arg);
-        else if (strcmp(cmd, "a") == 0) status = ed_append(arg);
-        else if (strcmp(cmd, "d") == 0) status = ed_delete(arg);
-        else if (strcmp(cmd, "i") == 0) status = ed_insert(arg);
-        else if (strcmp(cmd, "s") == 0) status = ed_search(arg);
-        else {
-            printf("  %s'%s' is not a command.%s Try %sa %s%s, or %sv%s for the full-screen editor.\n",
-                   C_WARN, cmd, C_OFF, C_BRAND, cmd, C_OFF, C_BRAND, C_OFF);
-            status = 1;
         }
     }
 
