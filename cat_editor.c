@@ -9,6 +9,43 @@
 
 static int ed_fd = -1;
 
+enum { ED_COMMANDS = 2 };
+
+static const struct {
+    const char *name, *args, *description;
+} ed_commands[] = {
+    {"o", "file",   "open or create a file"},
+    {"p", "[n]",    "print all text or line n"},
+    {"a", "text",   "append a line"},
+    {"d", "n",      "delete line n"},
+    {"i", "n text", "insert a line at n"},
+    {"s", "word",   "find matching lines"},
+    {"q", "",       "close the file and return to moon"},
+};
+
+static void ed_commands_text(char *buf, size_t len, int compact)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++) {
+        int n = snprintf(buf + off, len - off, "%s%s%s%s",
+                         i ? (compact ? " " : "  ") : "", ed_commands[i].name,
+                         !compact && *ed_commands[i].args ? " " : "",
+                         compact ? "" : ed_commands[i].args);
+        if (n < 0 || (size_t)n >= len - off) break;
+        off += (size_t)n;
+    }
+}
+
+static void ed_help(void)
+{
+    printf("  editor commands:\n");
+    for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++)
+        printf("  %s %-6s  %s\n", ed_commands[i].name, ed_commands[i].args,
+               ed_commands[i].description);
+    printf("  v         full-screen view (^O save, ^L commands, ^X return)\n"
+           "  help / ?  show these commands\n");
+}
+
 static ssize_t ed_read(int fd, void *buf, size_t len)
 {
     ssize_t n;
@@ -397,29 +434,41 @@ static void sc_add(Screen *s, const char *src, size_t n)
 
 static void sc_str(Screen *s, const char *t) { sc_add(s, t, strlen(t)); }
 
+static void sc_row(Screen *s, const char *text, int cols, int inverse, int next)
+{
+    size_t n = strlen(text);
+    if (n > (size_t)cols) n = (size_t)cols;
+    if (inverse) sc_str(s, "\x1b[7m");
+    sc_add(s, text, n);
+    sc_str(s, "\x1b[m\x1b[K");
+    if (next) sc_str(s, "\r\n");
+}
+
+static int ed_body_rows(int rows) { return rows > 3 ? rows - 3 : 0; }
+
 static void ed_winsize(int *rows, int *cols)
 {
     struct winsize ws;
-    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_row == 0) {
+    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_row == 0 || ws.ws_col == 0) {
         *rows = 24; *cols = 80;
     } else {
         *rows = ws.ws_row; *cols = ws.ws_col;
     }
 }
 
-static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff, int dirty)
+static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
+                   int dirty, const char *notice)
 {
     int rows, cols;
     ed_winsize(&rows, &cols);
 
-    int body = rows - 2;
+    int body = ed_body_rows(rows);
     Screen s = {NULL, 0, 0, 0};
     char tmp[256];
 
     sc_str(&s, "\x1b[?25l\x1b[H\x1b[2J");
 
-    snprintf(tmp, sizeof tmp, "\x1b[7m %-*.*s \x1b[m\r\n", cols - 2, cols - 2, path);
-    sc_str(&s, tmp);
+    if (rows > 2) sc_row(&s, path, cols, 1, 1);
 
     for (int y = 0; y < body; y++) {
         int i = y + rowoff;
@@ -433,12 +482,19 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff, int dir
         sc_str(&s, "\r\n");
     }
 
-    snprintf(tmp, sizeof tmp,
-             "\x1b[7m %d/%d  %s \x1b[m\x1b[K  ^O save   ^X exit",
-             cy + 1, d->count, dirty ? "modified" : "saved");
-    sc_str(&s, tmp);
+    if (rows > 1) {
+        ed_commands_text(tmp, sizeof tmp, 0);
+        if (strlen(tmp) > (size_t)cols) ed_commands_text(tmp, sizeof tmp, 1);
+        sc_row(&s, tmp, cols, 1, 1);
+    }
+    if (notice) snprintf(tmp, sizeof tmp, "%s", notice);
+    else snprintf(tmp, sizeof tmp, "^L commands  ^O save  ^X exit  %d/%d %s",
+                  cy + 1, d->count, dirty ? "modified" : "saved");
+    sc_row(&s, tmp, cols, 1, 0);
 
-    snprintf(tmp, sizeof tmp, "\x1b[%d;%dH\x1b[?25h", cy - rowoff + 2, cx + 1);
+    int cursor_row = body ? cy - rowoff + 2 : 1;
+    int cursor_col = cx < cols ? cx + 1 : cols;
+    snprintf(tmp, sizeof tmp, "\x1b[%d;%dH\x1b[?25h", cursor_row, cursor_col);
     sc_str(&s, tmp);
 
     int rc = s.failed ? -1 : ed_write_all(1, s.buf, s.len);
@@ -491,16 +547,17 @@ static int ed_visual(const char *path)
     if (ed_raw_on() == -1) { doc_free(&d); return 1; }
 
     int cy = 0, cx = 0, rowoff = 0, dirty = 0, rc = 0;
+    const char *notice = NULL;
 
     for (;;) {
         int rows, cols;
         ed_winsize(&rows, &cols);
-        int body = rows - 2;
+        int body = ed_body_rows(rows);
 
-        if (cy < rowoff) rowoff = cy;
-        if (cy >= rowoff + body) rowoff = cy - body + 1;
+        if (body == 0 || cy < rowoff) rowoff = cy;
+        else if (cy >= rowoff + body) rowoff = cy - body + 1;
 
-        if (ed_draw(&d, path, cy, cx, rowoff, dirty) == -1) { rc = 1; break; }
+        if (ed_draw(&d, path, cy, cx, rowoff, dirty, notice) == -1) { rc = 1; break; }
 
         char c;
         ssize_t n = ed_read(0, &c, 1);
@@ -508,6 +565,13 @@ static int ed_visual(const char *path)
         if (n == 0) break;
 
         if (c == 24) break;
+
+        if (c == 12) {
+            if (dirty) { notice = "save with ^O before commands"; continue; }
+            rc = ED_COMMANDS;
+            break;
+        }
+        notice = NULL;
 
         if (c == 15) {
             if (doc_store(&d) == -1) { rc = 1; break; }
@@ -625,10 +689,14 @@ int cmd_edit(int argc, char **argv)
         if (ed_open(argv[1]) != 0) return 1;
         snprintf(path, sizeof path, "%s", argv[1]);
         status = ed_visual(path);
-        if (ed_close() == -1) status = 1;
-        return status;
+        if (status != ED_COMMANDS) {
+            if (ed_close() == -1) status = 1;
+            return status;
+        }
+        status = 0;
     }
 
+    ed_help();
     for (;;) {
         printf("  %sed%s %s ", C_BRAND, C_OFF, ICON_PROMPT);
         fflush(stdout);
@@ -658,6 +726,11 @@ int cmd_edit(int argc, char **argv)
         }
 
         if (strcmp(cmd, "q") == 0) break;
+        if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
+            ed_help();
+            status = 0;
+            continue;
+        }
         if (strcmp(cmd, "o") == 0) {
             status = ed_open(arg);
             if (status == 0) snprintf(path, sizeof path, "%s", arg);
@@ -670,7 +743,10 @@ int cmd_edit(int argc, char **argv)
             continue;
         }
 
-        if (strcmp(cmd, "v") == 0) status = ed_visual(path);
+        if (strcmp(cmd, "v") == 0) {
+            status = ed_visual(path);
+            if (status == ED_COMMANDS) { status = 0; ed_help(); }
+        }
         else if (strcmp(cmd, "p") == 0) status = ed_print(arg);
         else if (strcmp(cmd, "a") == 0) status = ed_append(arg);
         else if (strcmp(cmd, "d") == 0) status = ed_delete(arg);
