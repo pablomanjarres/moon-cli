@@ -17,6 +17,13 @@ typedef struct {
     int matches;
 } EdFeedback;
 
+typedef struct {
+    char command[2048];
+    size_t used;
+    int focused;
+    EdFeedback feedback;
+} EdBar;
+
 static EdFeedback *ed_feedback = NULL;
 static int ed_out(const char *buf, size_t len);
 static void ed_report(const char *format, ...);
@@ -504,7 +511,25 @@ static void sc_row(Screen *s, const char *text, int cols, int inverse, int next)
     if (next) sc_str(s, "\r\n");
 }
 
-static int ed_body_rows(int rows) { return rows > 3 ? rows - 3 : 0; }
+static int ed_result_rows(int rows, int cols, EdFeedback *feedback, int *clipped)
+{
+    int limit = rows > 8 ? 4 : rows > 5 ? rows - 5 : 0;
+    int count = 0, cut = feedback->clipped;
+    size_t at = 0, len;
+    while (ed_next_line(feedback->text, feedback->len, &at, &len)) {
+        count++;
+        if (len + 8 > (size_t)cols) cut = 1;
+    }
+    if (count > limit) cut = 1;
+    if (clipped) *clipped = cut;
+    int total = count ? count + cut : 0;
+    return total < limit ? total : limit;
+}
+
+static int ed_body_rows(int rows, int results)
+{
+    return rows > 4 + results ? rows - 4 - results : 0;
+}
 
 static void ed_winsize(int *rows, int *cols)
 {
@@ -517,24 +542,39 @@ static void ed_winsize(int *rows, int *cols)
 }
 
 static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
-                   int dirty, const char *notice)
+                   int dirty, const char *notice, EdBar *bar)
 {
     int rows, cols;
     ed_winsize(&rows, &cols);
 
-    int body = ed_body_rows(rows);
+    int clipped;
+    int results = ed_result_rows(rows, cols, &bar->feedback, &clipped);
+    int body = ed_body_rows(rows, results);
     Screen s = {NULL, 0, 0, 0};
     char tmp[256];
 
     sc_str(&s, "\x1b[?25l\x1b[H\x1b[2J");
 
-    if (rows > 2) sc_row(&s, path, cols, 1, 1);
+    const char *title = path;
+    if (strlen(path) > (size_t)cols) {
+        const char *base = strrchr(path, '/');
+        if (base) title = base + 1;
+    }
+    if (rows > 3) sc_row(&s, title, cols, 1, 1);
+    int digits = 1;
+    for (int n = d->count; n >= 10; n /= 10) digits++;
+    int gutter = digits + 1;
+    if (gutter >= cols) gutter = 0;
 
     for (int y = 0; y < body; y++) {
         int i = y + rowoff;
         if (i < d->count) {
+            if (gutter) {
+                snprintf(tmp, sizeof tmp, "%*d ", digits, i + 1);
+                sc_str(&s, tmp);
+            }
             size_t n = strlen(d->line[i]);
-            if ((int)n > cols) n = (size_t)cols;
+            if (n > (size_t)(cols - gutter)) n = (size_t)(cols - gutter);
             sc_add(&s, d->line[i], n);
         } else {
             sc_str(&s, "\x1b[38;2;107;126;168m~\x1b[m");
@@ -542,7 +582,19 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
         sc_str(&s, "\r\n");
     }
 
-    if (rows > 1) {
+    size_t at = 0, len;
+    for (int y = 0; y < results; y++) {
+        if (clipped && y == results - 1) {
+            if (bar->feedback.matches) snprintf(tmp, sizeof tmp,
+                "%d matches; results clipped", bar->feedback.matches);
+            else snprintf(tmp, sizeof tmp, "... results clipped");
+        } else {
+            char *line = ed_next_line(bar->feedback.text, bar->feedback.len, &at, &len);
+            snprintf(tmp, sizeof tmp, "Result: %.*s", (int)len, line ? line : "");
+        }
+        sc_row(&s, tmp, cols, 0, 1);
+    }
+    if (rows > 2) {
         ed_commands_text(tmp, sizeof tmp, 0);
         if (strlen(tmp) > (size_t)cols) ed_commands_text(tmp, sizeof tmp, 1);
         sc_row(&s, tmp, cols, 1, 1);
@@ -550,10 +602,18 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
     if (notice) snprintf(tmp, sizeof tmp, "%s", notice);
     else snprintf(tmp, sizeof tmp, "^L commands  ^O save  ^X exit  %d/%d %s",
                   cy + 1, d->count, dirty ? "modified" : "saved");
-    sc_row(&s, tmp, cols, 1, 0);
+    if (rows > 1) sc_row(&s, tmp, cols, 1, 1);
+    const char *prefix = "Command: ";
+    size_t room = cols > 9 ? (size_t)cols - 9 : (size_t)cols;
+    size_t start = bar->used > room ? bar->used - room : 0;
+    if (bar->focused) snprintf(tmp, sizeof tmp, "%s%s",
+                              cols > 9 ? prefix : "", bar->command + start);
+    else snprintf(tmp, sizeof tmp, "Editing; ^L commands");
+    sc_row(&s, tmp, cols, bar->focused, 0);
 
-    int cursor_row = body ? cy - rowoff + 2 : 1;
-    int cursor_col = cx < cols ? cx + 1 : cols;
+    int cursor_row = bar->focused ? rows : body ? cy - rowoff + 2 : 1;
+    int cursor_col = bar->focused ? (int)strlen(tmp) + 1 : cx + gutter + 1;
+    if (cursor_col > cols) cursor_col = cols;
     snprintf(tmp, sizeof tmp, "\x1b[%d;%dH\x1b[?25h", cursor_row, cursor_col);
     sc_str(&s, tmp);
 
@@ -608,16 +668,17 @@ static int ed_visual(const char *path)
 
     int cy = 0, cx = 0, rowoff = 0, dirty = 0, rc = 0;
     const char *notice = NULL;
+    EdBar bar = {0};
 
     for (;;) {
         int rows, cols;
         ed_winsize(&rows, &cols);
-        int body = ed_body_rows(rows);
+        int body = ed_body_rows(rows, ed_result_rows(rows, cols, &bar.feedback, NULL));
 
         if (body == 0 || cy < rowoff) rowoff = cy;
         else if (cy >= rowoff + body) rowoff = cy - body + 1;
 
-        if (ed_draw(&d, path, cy, cx, rowoff, dirty, notice) == -1) { rc = 1; break; }
+        if (ed_draw(&d, path, cy, cx, rowoff, dirty, notice, &bar) == -1) { rc = 1; break; }
 
         char c;
         ssize_t n = ed_read(0, &c, 1);
