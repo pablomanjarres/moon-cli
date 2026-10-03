@@ -62,8 +62,11 @@ class Session:
 
     def command(self, text, width=80, exits=False):
         # Each printable key causes a frame; do not accept a partial typed command.
+        typed = ""
         for key in text:
-            check_layout(self.visual(key), width)
+            typed += key
+            frame = check_layout(self.visual(key), width)
+            assert typed[-min(16, width // 2):] in frame, "typed command is hidden"
         if exits:
             return self.send("\r", SHELL)
         return check_layout(self.visual("\r"), width)
@@ -177,7 +180,8 @@ def dirty_and_return(folder):
         check_view(text, file, ("Xalpha", "beta", "added"))
         assert file.read_bytes() == b"Xalpha\nbeta\nadded\n"
         session.visual("\x0c")
-        session.visual("Y")  # Ctrl+L returned focus to document editing.
+        text = check_layout(session.visual("Y"), 80)
+        assert any("Y" in row and "alpha" in row for row in text.split("\r\n")), "Ctrl+L did not return document focus"
         session.send("\x18", SHELL)
         session.restored()
         assert file.read_bytes() == b"Xalpha\nbeta\nadded\n", "^X saved without request"
