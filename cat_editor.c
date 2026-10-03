@@ -147,23 +147,24 @@ static void ed_error(const char *name)
     perror(name);
 }
 
+static char *ed_next_line(char *buf, size_t len, size_t *at, size_t *out_len)
+{
+    if (*at >= len) return NULL;
+    size_t i = *at, j = i;
+    while (j < len && buf[j] != '\n') j++;
+    *out_len = j - i;
+    *at = j < len ? j + 1 : j;
+    return buf + i;
+}
+
 static char *ed_line(char *buf, size_t len, int n, size_t *out_len)
 {
     if (n < 1) return NULL;
-
-    size_t i = 0;
-    int cur = 1;
-    while (i < len && cur < n) {
-        if (buf[i] == '\n') cur++;
-        i++;
-    }
-    if (cur != n || i >= len) return NULL;
-
-    size_t j = i;
-    while (j < len && buf[j] != '\n') j++;
-
-    *out_len = j - i;
-    return buf + i;
+    size_t at = 0;
+    char *line;
+    for (int cur = 1; (line = ed_next_line(buf, len, &at, out_len)); cur++)
+        if (cur == n) return line;
+    return NULL;
 }
 
 static int ed_print(const char *arg)
@@ -174,8 +175,17 @@ static int ed_print(const char *arg)
 
     int rc = 0;
     if (!arg || !*arg) {
-        if (ed_feedback) ed_report("All file lines:\n");
-        if (len) {
+        if (ed_feedback) {
+            ed_report("All file lines:\n");
+            size_t at = 0, ll;
+            int n = 1;
+            char *line;
+            while ((line = ed_next_line(buf, len, &at, &ll))) {
+                ed_report("%d  ", n++);
+                ed_out(line, ll);
+                ed_out("\n", 1);
+            }
+        } else if (len) {
             rc = ed_out(buf, len) == -1;
             if (!rc && buf[len - 1] != '\n') rc = ed_out("\n", 1) == -1;
         }
@@ -320,22 +330,18 @@ static int ed_search(const char *word)
     if (!buf) return 1;
 
     int hits = 0;
-    size_t i = 0;
+    size_t at = 0, ll;
     int n = 1;
+    char *line;
 
-    while (i < len) {
-        size_t j = i;
-        while (j < len && buf[j] != '\n') j++;
-
-        char save = buf[j];
-        buf[j] = '\0';
-        if (strstr(buf + i, word)) {
-            ed_report("  %d  %s\n", n, buf + i);
+    while ((line = ed_next_line(buf, len, &at, &ll))) {
+        char save = line[ll];
+        line[ll] = '\0';
+        if (strstr(line, word)) {
+            ed_report("  %d  %s\n", n, line);
             hits++;
         }
-        buf[j] = save;
-
-        i = j + 1;
+        line[ll] = save;
         n++;
     }
 
