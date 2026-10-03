@@ -8,6 +8,7 @@ import re
 import select
 import signal
 import struct
+import subprocess
 import tempfile
 import termios
 import time
@@ -230,6 +231,16 @@ def legacy_visual_return(folder):
         session.close()
 
 
+def legacy_long_match(folder):
+    file = folder / "long-match.txt"
+    line = "needle " + "x" * 700 + " tail"
+    file.write_text(line + "\n")
+    result = subprocess.run(["./moon"], input=f"edit\no {file}\ns needle\nq\nexit\n",
+                            text=True, capture_output=True, timeout=3, check=True)
+    assert line in ANSI.sub("", result.stdout), "legacy search truncated matched text"
+    assert file.read_text() == line + "\n", "search modified its file"
+
+
 def narrow_and_long_line(folder):
     file = folder / "long.txt"
     file.write_bytes(b"x" * 160 + b"\n")
@@ -255,6 +266,7 @@ def narrow_and_long_line(folder):
 
 with tempfile.TemporaryDirectory(prefix="moon-command-mode-") as directory:
     folder = Path(directory)
+    legacy_long_match(folder)
     for width in (80, 50):
         commands_from_visual(folder, width)
     dirty_and_return(folder)
