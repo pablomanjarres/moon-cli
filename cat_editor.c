@@ -132,6 +132,11 @@ static void ed_report(const char *format, ...)
     char buf[512];
     va_list args;
     va_start(args, format);
+    if (!ed_feedback) {
+        vprintf(format, args);
+        va_end(args);
+        return;
+    }
     int n = vsnprintf(buf, sizeof buf, format, args);
     va_end(args);
     if (n < 0) return;
