@@ -25,8 +25,12 @@ class Session:
             os.execv("./moon", ["./moon"])
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", 24, width, 0, 0))
-        self.expect(SHELL)
-        self.saved = termios.tcgetattr(self.fd)
+        try:
+            self.expect(SHELL)
+            self.saved = termios.tcgetattr(self.fd)
+        except BaseException:
+            self.close()
+            raise
 
     def expect(self, pattern, raw=False):
         data = b""
@@ -43,6 +47,7 @@ class Session:
             if not chunk:
                 break
             data += chunk
+            assert len(data) <= 1024 * 1024, "terminal output exceeded test limit"
             text = data.decode("utf-8", "replace")
             if re.search(pattern, text if raw else ANSI.sub("", text)):
                 return text
@@ -68,12 +73,14 @@ class Session:
 
 
 def check_help(frame, width):
+    frame = frame.rsplit("\x1b[2J", 1)[-1]
     text = ANSI.sub("", frame)
     for syntax in (r"o <?file>?", r"p \[n\]", r"a <?text>?", r"d <?n>?",
                    r"i <?n>? <?text>?", r"s <?word>?"):
         assert re.search(r"\b" + syntax, text), f"help missing {syntax} at {width} columns"
     assert re.search(r"\bq\b", text), "fullscreen help missing q"
     assert re.search(r"\^L\s+commands", text), "fullscreen help missing ^L shortcut"
+    assert len(text.split("\r\n")) <= 24, "help renders below terminal bottom"
     assert all(len(row) <= width for row in text.split("\r\n")), "UI wraps past width"
     for row, col in re.findall(r"\x1b\[(\d+);(\d+)H", frame):
         assert 1 <= int(row) <= 24 and 1 <= int(col) <= width, "cursor outside screen"
