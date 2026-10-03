@@ -29,7 +29,7 @@ static int ed_out(const char *buf, size_t len);
 static void ed_report(const char *format, ...);
 static void ed_error(const char *name);
 
-enum { ED_COMMANDS = 2, ED_VIEW, ED_QUIT };
+enum { ED_VIEW = 2, ED_QUIT };
 enum { ED_OPEN, ED_PRINT, ED_APPEND, ED_DELETE, ED_INSERT, ED_SEARCH, ED_CLOSE };
 
 static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *refresh);
@@ -660,7 +660,7 @@ static int line_set(Doc *d, int at, const char *src, size_t n)
 }
 
 
-static int ed_visual(const char *path)
+static int ed_visual(char *path, size_t path_size)
 {
     Doc d;
     if (doc_load(&d) == -1) return 1;
@@ -688,15 +688,48 @@ static int ed_visual(const char *path)
         if (c == 24) break;
 
         if (c == 12) {
-            if (dirty) { notice = "save with ^O before commands"; continue; }
-            rc = ED_COMMANDS;
-            break;
+            bar.focused = !bar.focused;
+            notice = NULL;
+            continue;
         }
         notice = NULL;
 
         if (c == 15) {
-            if (doc_store(&d) == -1) { rc = 1; break; }
-            dirty = 0;
+            bar.feedback = (EdFeedback){0};
+            ed_feedback = &bar.feedback;
+            if (doc_store(&d) == -1) rc = 1;
+            else { dirty = 0; rc = 0; ed_report("saved file\n"); }
+            ed_feedback = NULL;
+            continue;
+        }
+
+        if (bar.focused && c != 27) {
+            if (c == '\r' || c == '\n') {
+                if (!bar.used) continue;
+                bar.feedback = (EdFeedback){0};
+                ed_feedback = &bar.feedback;
+                int refresh, status = ed_execute(bar.command, path, path_size, dirty, &refresh);
+                bar.used = 0; bar.command[0] = '\0';
+                if (status == ED_QUIT) { ed_feedback = NULL; rc = ED_QUIT; break; }
+                if (status == ED_VIEW) bar.focused = 0;
+                if (refresh) {
+                    Doc next;
+                    if (doc_load(&next) == -1) { ed_feedback = NULL; rc = 1; break; }
+                    doc_free(&d); d = next;
+                    if (refresh == 2) cy = cx = rowoff = 0;
+                    if (cy >= d.count) cy = d.count - 1;
+                    int len = (int)strlen(d.line[cy]);
+                    if (cx > len) cx = len;
+                }
+                ed_feedback = NULL;
+            } else if (c == 127 || c == 8) {
+                if (bar.used) bar.command[--bar.used] = '\0';
+            } else if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
+                if (bar.used < sizeof bar.command - 1) {
+                    bar.command[bar.used++] = c;
+                    bar.command[bar.used] = '\0';
+                }
+            }
             continue;
         }
 
@@ -708,6 +741,7 @@ static int ed_visual(const char *path)
             n = ed_read(0, &seq[1], 1);
             if (n == -1) { ed_error("read"); rc = 1; break; }
             if (n != 1) break;
+            if (bar.focused) continue;
             if (seq[0] != '[') continue;
             if (seq[1] == 'A' && cy > 0) cy--;
             else if (seq[1] == 'B' && cy < d.count - 1) cy++;
@@ -833,8 +867,9 @@ static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *
         return 1;
     }
     if (kind == ED_OPEN) {
+        if (strlen(arg) >= path_size) { ed_report("file path too long\n"); return 1; }
         int rc = ed_open(arg);
-        if (!rc) { snprintf(path, path_size, "%s", arg); *refresh = 1; }
+        if (!rc) { snprintf(path, path_size, "%s", arg); *refresh = 2; }
         return rc;
     }
     if (ed_fd == -1) { ed_report("  no file open; use o <file>\n"); return 1; }
@@ -861,14 +896,13 @@ int cmd_edit(int argc, char **argv)
     int status = 0;
 
     if (argc >= 2) {
+        if (strlen(argv[1]) >= sizeof path) { ed_report("file path too long\n"); return 1; }
         if (ed_open(argv[1]) != 0) return 1;
         snprintf(path, sizeof path, "%s", argv[1]);
-        status = ed_visual(path);
-        if (status != ED_COMMANDS) {
-            if (ed_close() == -1) status = 1;
-            return status;
-        }
-        status = 0;
+        status = ed_visual(path, sizeof path);
+        if (status == ED_QUIT) status = 0;
+        if (ed_close() == -1) status = 1;
+        return status;
     }
 
     ed_help();
@@ -890,8 +924,8 @@ int cmd_edit(int argc, char **argv)
         status = ed_execute(line, path, sizeof path, 0, &refresh);
         if (status == ED_QUIT) { status = 0; break; }
         if (status == ED_VIEW) {
-            status = ed_visual(path);
-            if (status == ED_COMMANDS) { status = 0; ed_help(); }
+            status = ed_visual(path, sizeof path);
+            if (status == ED_QUIT) { status = 0; break; }
         }
     }
 
