@@ -130,10 +130,13 @@ def commands_from_visual(folder, width):
         check_view(text, file, ("alpha", "beta"))
         printed = session.command("p", width)
         check_view(printed, file, ("alpha", "beta"))
-        assert re.search(r"print|show|all|lines", printed, re.I), "p result missing"
+        results = "\r\n".join(printed.split("\r\n")[3:])
+        assert re.search(r"\b1\b[^\r\n]*alpha", results), "p lost first result line"
+        assert re.search(r"\b2\b[^\r\n]*beta", results), "p lost second result line"
         printed = session.command("p 2", width)
         check_view(printed, file, ("alpha", "beta"))
-        assert re.search(r"\b2\b[^\r\n]*beta", printed), "p 2 lost selected result"
+        results = "\r\n".join(printed.split("\r\n")[3:])
+        assert re.search(r"\b2\b[^\r\n]*beta", results), "p 2 lost selected result"
         text = session.command("a typo\x7f\x7f\x7f\x7fadded", width)
         assert file.read_bytes() == b"alpha\nbeta\nadded\n"
         check_view(text, file, ("alpha", "beta", "added"))
@@ -141,7 +144,8 @@ def commands_from_visual(folder, width):
         assert file.read_bytes() == b"alpha\ninserted\nbeta\nadded\n"
         check_view(text, file, ("alpha", "inserted", "beta", "added"))
         found = session.command("s inserted", width)
-        assert re.search(r"\b2\b[^\r\n]*inserted", found), "s lost line number"
+        results = "\r\n".join(found.split("\r\n")[5:])
+        assert re.search(r"\b2\b[^\r\n]*inserted", results), "s lost line number"
         assert re.search(r"not found|no matches|no results", session.command("s absent", width), re.I)
         text = session.command("d 1", width)
         assert file.read_bytes() == b"inserted\nbeta\nadded\n"
@@ -184,7 +188,8 @@ def dirty_and_return(folder):
         assert file.read_bytes() == b"Xalpha\nbeta\nadded\n"
         session.visual("\x0c")
         text = check_layout(session.visual("Y"), 80)
-        assert any("Y" in row and "alpha" in row for row in text.split("\r\n")), "Ctrl+L did not return document focus"
+        body = text.split("\r\n")[1:4]
+        assert any("Y" in row for row in body), "Ctrl+L did not return document focus"
         session.send("\x18", SHELL)
         session.restored()
         assert file.read_bytes() == b"Xalpha\nbeta\nadded\n", "^X saved without request"
