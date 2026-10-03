@@ -60,6 +60,18 @@ class Session:
     def visual(self, text):
         return self.send(text, r"\x1b\[\?25h$", raw=True)
 
+    def command(self, text, width=80, exits=False):
+        # Each printable key causes a frame; do not accept a partial typed command.
+        for key in text:
+            self.visual(key)
+        if exits:
+            return self.send("\r", SHELL)
+        return check_layout(self.visual("\r"), width)
+
+    def raw(self):
+        flags = termios.tcgetattr(self.fd)[3]
+        assert not flags & (termios.ICANON | termios.ECHO), "command bar left raw mode"
+
     def restored(self):
         assert termios.tcgetattr(self.fd) == self.saved, "terminal not restored"
 
@@ -91,6 +103,13 @@ def check_help(frame, width):
     assert re.search(r"\^L\s+commands", text), "fullscreen help missing ^L shortcut"
 
 
+def check_view(text, file, lines):
+    assert file.name in text.split("\r\n")[0], "file name disappeared from view"
+    for line in lines:
+        assert line in text.split("\r\n"), "document line disappeared: " + line
+    assert not re.search(r"\bfd\s+\d+", text), "raw descriptor leaked into UI"
+
+
 def commands_from_visual(folder, width):
     file = folder / "commands.txt"
     other = folder / "other.txt"
@@ -99,28 +118,37 @@ def commands_from_visual(folder, width):
     session = Session(width)
     try:
         frame = session.visual(f"edit {file}\n")
-        # Try the shortcut first so the regression fails on unreachable commands.
-        session.send("\x0c")
-        session.restored()
         check_help(frame, width)
-        printed = ANSI.sub("", session.send("p\n"))
-        assert "\nalpha\r\nbeta\r\n" in printed, "p did not print the open file"
-        printed = ANSI.sub("", session.send("p 2\n"))
-        assert "\nbeta\r\n" in printed and "\nalpha\r\n" not in printed
-        session.send("a added\n")
+        text = check_layout(session.visual("\x0c"), width)
+        session.raw()
+        check_view(text, file, ("alpha", "beta"))
+        printed = session.command("p", width)
+        check_view(printed, file, ("alpha", "beta"))
+        assert re.search(r"print|show|all|lines", printed, re.I), "p result missing"
+        printed = session.command("p 2", width)
+        check_view(printed, file, ("alpha", "beta"))
+        assert re.search(r"\b2\b[^\r\n]*beta", printed), "p 2 lost selected result"
+        text = session.command("a added", width)
         assert file.read_bytes() == b"alpha\nbeta\nadded\n"
-        session.send("i 2 inserted\n")
+        check_view(text, file, ("alpha", "beta", "added"))
+        text = session.command("i 2 inserted", width)
         assert file.read_bytes() == b"alpha\ninserted\nbeta\nadded\n"
-        found = ANSI.sub("", session.send("s inserted\n"))
-        assert re.search(r"\n\s*2\s+inserted\r\n", found), "s lost line number"
-        session.send("d 1\n")
+        check_view(text, file, ("alpha", "inserted", "beta", "added"))
+        found = session.command("s inserted", width)
+        assert re.search(r"\b2\b[^\r\n]*inserted", found), "s lost line number"
+        assert re.search(r"not found|no matches|no results", session.command("s absent", width), re.I)
+        text = session.command("d 1", width)
         assert file.read_bytes() == b"inserted\nbeta\nadded\n"
-        session.send(f"o {other}\n")
-        assert "\nother\r\n" in ANSI.sub("", session.send("p\n"))
-        session.send("a changed\n")
+        check_view(text, file, ("inserted", "beta", "added"))
+        text = session.command(f"o {other}", width)
+        check_view(text, other, ("other",))
+        text = session.command("o /nope/missing.txt", width)
+        check_view(text, other, ("other",))
+        assert re.search(r"no such|cannot|failed|error", text, re.I), "open error missing"
+        session.command("a changed", width)
         assert other.read_bytes() == b"other\nchanged\n"
         assert file.read_bytes() == b"inserted\nbeta\nadded\n"
-        session.send("q\n", SHELL)
+        session.command("q", exits=True)
         session.restored()
     finally:
         session.close()
