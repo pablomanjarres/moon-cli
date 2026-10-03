@@ -286,14 +286,15 @@ def narrow_and_long_line(folder):
         session.close()
 
 
-with tempfile.TemporaryDirectory(prefix="moon-command-mode-") as directory:
-    folder = Path(directory)
-    legacy_long_match(folder)
-    cancel_command(folder)
-    for width in (80, 50):
-        commands_from_visual(folder, width)
-    dirty_and_return(folder)
-    help_without_file()
-    legacy_visual_return(folder)
-    narrow_and_long_line(folder)
-print("  ok   fullscreen commands, help, narrow UI, dirty protection and terminal restore")
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory(prefix="moon-command-mode-") as directory:
+        folder = Path(directory)
+        legacy_long_match(folder)
+        cancel_command(folder)
+        for width in (80, 50):
+            commands_from_visual(folder, width)
+        dirty_and_return(folder)
+        help_without_file()
+        legacy_visual_return(folder)
+        narrow_and_long_line(folder)
+    print("  ok   fullscreen commands, help, narrow UI, dirty protection and terminal restore")
