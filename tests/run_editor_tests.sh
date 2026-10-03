@@ -111,5 +111,7 @@ ${CC:-cc} -Wall -Wextra -std=gnu99 -D_GNU_SOURCE \
     tests/editor_error_cases.c ui.c -o "$T"
 "$T" 2>/dev/null
 
+python3 tests/test_command_mode.py
+
 echo
 echo "  all passed"
