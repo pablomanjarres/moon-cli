@@ -241,6 +241,28 @@ def legacy_long_match(folder):
     assert file.read_text() == line + "\n", "search modified its file"
 
 
+def cancel_command(folder):
+    file = folder / "cancel.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("\x0c")
+        for key in "a discarded":
+            session.visual(key)
+        text = check_layout(session.visual("\x1b"), 80)
+        check_view(text, file, ("alpha", "beta"))
+        assert file.read_bytes() == b"alpha\nbeta\n", "ESC executed pending command"
+        text = check_layout(session.visual("Z"), 80)
+        check_view(text, file, ("Zalpha", "beta"))
+        assert file.read_bytes() == b"alpha\nbeta\n", "ESC saved visual edits"
+        session.visual("\x0c")
+        session.command("q", exits=True)
+        session.restored()
+    finally:
+        session.close()
+
+
 def narrow_and_long_line(folder):
     file = folder / "long.txt"
     file.write_bytes(b"x" * 160 + b"\n")
@@ -267,6 +289,7 @@ def narrow_and_long_line(folder):
 with tempfile.TemporaryDirectory(prefix="moon-command-mode-") as directory:
     folder = Path(directory)
     legacy_long_match(folder)
+    cancel_command(folder)
     for width in (80, 50):
         commands_from_visual(folder, width)
     dirty_and_return(folder)
