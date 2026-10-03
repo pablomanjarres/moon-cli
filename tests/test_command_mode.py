@@ -72,18 +72,23 @@ class Session:
         os.close(self.fd)
 
 
-def check_help(frame, width):
+def check_layout(frame, width):
     frame = frame.rsplit("\x1b[2J", 1)[-1]
     text = ANSI.sub("", frame)
+    assert len(text.split("\r\n")) <= 24, "help renders below terminal bottom"
+    assert all(len(row) <= width for row in text.split("\r\n")), "UI wraps past width"
+    for row, col in re.findall(r"\x1b\[(\d+);(\d+)H", frame):
+        assert 1 <= int(row) <= 24 and 1 <= int(col) <= width, "cursor outside screen"
+    return text
+
+
+def check_help(frame, width):
+    text = check_layout(frame, width)
     for syntax in (r"o <?file>?", r"p \[n\]", r"a <?text>?", r"d <?n>?",
                    r"i <?n>? <?text>?", r"s <?word>?"):
         assert re.search(r"\b" + syntax, text), f"help missing {syntax} at {width} columns"
     assert re.search(r"\bq\b", text), "fullscreen help missing q"
     assert re.search(r"\^L\s+commands", text), "fullscreen help missing ^L shortcut"
-    assert len(text.split("\r\n")) <= 24, "help renders below terminal bottom"
-    assert all(len(row) <= width for row in text.split("\r\n")), "UI wraps past width"
-    for row, col in re.findall(r"\x1b\[(\d+);(\d+)H", frame):
-        assert 1 <= int(row) <= 24 and 1 <= int(col) <= width, "cursor outside screen"
 
 
 def commands_from_visual(folder, width):
@@ -154,9 +159,47 @@ def dirty_and_return(folder):
         session.close()
 
 
+def help_without_file():
+    session = Session(80)
+    try:
+        for command in ("edit\n", "help\n", "?\n"):
+            text = ANSI.sub("", session.send(command))
+            assert "editor commands:" in text, "line mode did not show help"
+            for name in ("o", "p", "a", "d", "i", "s", "q", "v"):
+                assert re.search(r"\n\s*" + name + r"\s", text), "help omitted " + name
+            assert "no file open" not in text, "help requires an open file"
+        assert "no file open" in ANSI.sub("", session.send("p\n"))
+        session.send("q\n", SHELL)
+        session.restored()
+    finally:
+        session.close()
+
+
+def narrow_and_long_line(folder):
+    file = folder / "long.txt"
+    file.write_bytes(b"x" * 160 + b"\n")
+    session = Session(20)
+    try:
+        text = check_layout(session.visual(f"edit {file}\n"), 20)
+        assert "o p a d i s q" in text, "narrow help omitted command names"
+        assert "^L commands" in text, "narrow help omitted command shortcut"
+        for _ in range(25):
+            check_layout(session.visual("\x1b[C"), 20)
+        check_layout(session.visual("Z"), 20)
+        session.visual("\x0f")
+        assert file.read_bytes() == b"x" * 25 + b"Z" + b"x" * 135 + b"\n"
+        session.send("\x0c")
+        session.restored()
+        session.send("q\n", SHELL)
+    finally:
+        session.close()
+
+
 with tempfile.TemporaryDirectory(prefix="moon-command-mode-") as directory:
     folder = Path(directory)
     for width in (80, 50):
         commands_from_visual(folder, width)
     dirty_and_return(folder)
-print("  ok   fullscreen commands, dirty protection, mode returns and terminal restore")
+    help_without_file()
+    narrow_and_long_line(folder)
+print("  ok   fullscreen commands, help, narrow UI, dirty protection and terminal restore")
