@@ -63,7 +63,7 @@ class Session:
     def command(self, text, width=80, exits=False):
         # Each printable key causes a frame; do not accept a partial typed command.
         for key in text:
-            self.visual(key)
+            check_layout(self.visual(key), width)
         if exits:
             return self.send("\r", SHELL)
         return check_layout(self.visual("\r"), width)
@@ -164,25 +164,23 @@ def dirty_and_return(folder):
         frame = session.visual("\x0c")
         text = ANSI.sub("", frame)
         assert "Xalpha" in text, "dirty document was discarded"
-        assert re.search(r"save.*\^O|\^O.*save", text, re.I), "missing save-first hint"
-        assert not termios.tcgetattr(session.fd)[3] & termios.ICANON
+        session.raw()
         assert file.read_bytes() == b"alpha\nbeta\n", "unsaved content reached disk"
+        for command in ("a blocked", "d 1", "i 1 blocked", "o /nope/blocked.txt"):
+            text = session.command(command)
+            check_view(text, file, ("Xalpha", "beta"))
+            assert re.search(r"save.*\^O|\^O.*save", text, re.I), "missing save-first hint"
+            assert file.read_bytes() == b"alpha\nbeta\n", "dirty command changed disk"
         session.visual("\x0f")
         assert file.read_bytes() == b"Xalpha\nbeta\n"
-        session.send("\x0c")
-        session.restored()
-        assert "\nXalpha\r\nbeta\r\n" in ANSI.sub("", session.send("p\n"))
-        frame = session.visual("v\n")
-        assert "Xalpha" in frame, "v did not reopen the same file"
-        session.send("\x18")
-        session.restored()
-        session.send("q\n", SHELL)
-        session.restored()
-        session.visual(f"edit {file}\n")
-        session.visual("Y")
+        text = session.command("a added")
+        check_view(text, file, ("Xalpha", "beta", "added"))
+        assert file.read_bytes() == b"Xalpha\nbeta\nadded\n"
+        session.visual("\x0c")
+        session.visual("Y")  # Ctrl+L returned focus to document editing.
         session.send("\x18", SHELL)
         session.restored()
-        assert file.read_bytes() == b"Xalpha\nbeta\n", "^X saved without request"
+        assert file.read_bytes() == b"Xalpha\nbeta\nadded\n", "^X saved without request"
     finally:
         session.close()
 
@@ -203,6 +201,23 @@ def help_without_file():
         session.close()
 
 
+def legacy_visual_return(folder):
+    file = folder / "legacy.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.send("edit\n")
+        session.send(f"o {file}\n")
+        session.visual("v\n")
+        session.send("\x18")
+        session.restored()
+        assert "\nbeta\r\n" in ANSI.sub("", session.send("p 2\n"))
+        session.send("q\n", SHELL)
+        session.restored()
+    finally:
+        session.close()
+
+
 def narrow_and_long_line(folder):
     file = folder / "long.txt"
     file.write_bytes(b"x" * 160 + b"\n")
@@ -216,9 +231,12 @@ def narrow_and_long_line(folder):
         check_layout(session.visual("Z"), 20)
         session.visual("\x0f")
         assert file.read_bytes() == b"x" * 25 + b"Z" + b"x" * 135 + b"\n"
-        session.send("\x0c")
+        check_layout(session.visual("\x0c"), 20)
+        session.raw()
+        session.command("a " + "y" * 60, 20)
+        assert file.read_bytes() == b"x" * 25 + b"Z" + b"x" * 135 + b"\n" + b"y" * 60 + b"\n"
+        session.command("q", width=20, exits=True)
         session.restored()
-        session.send("q\n", SHELL)
     finally:
         session.close()
 
@@ -229,5 +247,6 @@ with tempfile.TemporaryDirectory(prefix="moon-command-mode-") as directory:
         commands_from_visual(folder, width)
     dirty_and_return(folder)
     help_without_file()
+    legacy_visual_return(folder)
     narrow_and_long_line(folder)
 print("  ok   fullscreen commands, help, narrow UI, dirty protection and terminal restore")
