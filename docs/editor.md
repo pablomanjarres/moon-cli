@@ -19,9 +19,10 @@ de archivo; abrir la barra no los guarda ni los descarta.
 `edit` sin nombre de archivo conserva el modo de líneas. Su ayuda aparece
 al entrar y se puede repetir con `help` o `?`, incluso sin archivo abierto.
 `v` abre la vista visual. Allí, `Ctrl+X` regresa al modo de líneas;
-`q` cierra el archivo y vuelve a `moon`.
+`q` cierra el archivo y vuelve a `moon`; si hay cambios del cursor pendientes,
+primero exige guardarlos con `Ctrl+O`.
 Si se entró directamente con `edit archivo.txt`, `Ctrl+X` vuelve a `moon`.
-`Ctrl+X` no guarda cambios.
+`Ctrl+X` descarta los cambios del cursor que no se hayan guardado.
 
 | Modo de líneas | Qué hace | Llamadas usadas |
 |---|---|---|

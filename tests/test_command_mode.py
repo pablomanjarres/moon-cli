@@ -253,11 +253,102 @@ def cancel_command(folder):
         text = check_layout(session.visual("\x1b"), 80)
         check_view(text, file, ("alpha", "beta"))
         assert file.read_bytes() == b"alpha\nbeta\n", "ESC executed pending command"
-        text = check_layout(session.visual("Z"), 80)
+        frame = session.send("Z", r"Zalpha[\s\S]*\x1b\[\?25h$", raw=True)
+        text = check_layout(frame, 80)
         check_view(text, file, ("Zalpha", "beta"))
         assert file.read_bytes() == b"alpha\nbeta\n", "ESC saved visual edits"
         session.visual("\x0c")
+        session.visual("\x0f")
         session.command("q", exits=True)
+        session.restored()
+    finally:
+        session.close()
+
+
+def dirty_quit(folder):
+    file = folder / "dirty-quit.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("X")
+        session.visual("\x0c")
+        text = session.command("q")
+        check_view(text, file, ("Xalpha", "beta"))
+        session.raw()
+        assert re.search(r"save.*\^O|\^O.*save", text, re.I), "dirty q omitted save hint"
+        assert file.read_bytes() == b"alpha\nbeta\n", "dirty q changed disk"
+        session.visual("\x0f")
+        assert file.read_bytes() == b"Xalpha\nbeta\n"
+        session.command("q", exits=True)
+        session.restored()
+    finally:
+        session.close()
+
+
+def delayed_arrow(folder, prefix_delay, direction_delay):
+    file = folder / "arrow.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        os.write(session.fd, b"\x1b" if prefix_delay else b"\x1b[")
+        if prefix_delay:
+            time.sleep(prefix_delay)
+            os.write(session.fd, b"[")
+        time.sleep(direction_delay)
+        os.write(session.fd, b"B")
+        # A distinct bar frame is a barrier after all fragmented input bytes.
+        frame = session.send("\x0c", r"Command: [^\r\n]*\x1b\[\?25h$", raw=True)
+        check_view(check_layout(frame, 80), file, ("alpha", "beta"))
+        session.raw()
+        session.visual("\x0c")
+        text = check_layout(session.visual("Z"), 80)
+        check_view(text, file, ("alpha", "Zbeta"))
+        assert file.read_bytes() == b"alpha\nbeta\n", "fragmented arrow saved text"
+        session.send("\x18", SHELL)
+        session.restored()
+    finally:
+        session.close()
+
+
+def queued_escape(folder):
+    file = folder / "queued-escape.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("\x0c")
+        session.visual("a")
+        os.write(session.fd, b"\x1bZ")
+        frame = session.send("\x0c", r"Command: [^\r\n]*\x1b\[\?25h$", raw=True)
+        check_view(check_layout(frame, 80), file, ("Zalpha", "beta"))
+        assert file.read_bytes() == b"alpha\nbeta\n", "queued Escape saved text"
+        session.visual("\x0f")
+        session.command("q", exits=True)
+        session.restored()
+    finally:
+        session.close()
+
+
+def literal_after_escape(folder, literal):
+    file = folder / "literal.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("\x0c")
+        session.visual("a")
+        session.visual("\x1b")
+        session.raw()
+        for key in literal:
+            session.visual(key)
+        assert file.read_bytes() == b"alpha\nbeta\n", "literal typing saved without Ctrl+O"
+        frame = session.send("\x0f", r"saved file[\s\S]*\x1b\[\?25h$", raw=True)
+        wanted = (literal + "alpha\nbeta\n").encode()
+        assert file.read_bytes() == wanted, "Escape consumed literal text: " + repr(file.read_bytes())
+        check_view(check_layout(frame, 80), file, (literal + "alpha", "beta"))
+        session.send("\x18", SHELL)
         session.restored()
     finally:
         session.close()
@@ -291,6 +382,12 @@ if __name__ == "__main__":
         folder = Path(directory)
         legacy_long_match(folder)
         cancel_command(folder)
+        dirty_quit(folder)
+        queued_escape(folder)
+        for literal in ("[text]", "[123text]"):
+            literal_after_escape(folder, literal)
+        for prefix, direction in ((0.06, 0), (0.2, 0), (0, 0.06), (0, 0.2), (0.2, 0.2), (0.35, 0)):
+            delayed_arrow(folder, prefix, direction)
         for width in (80, 50):
             commands_from_visual(folder, width)
         dirty_and_return(folder)
