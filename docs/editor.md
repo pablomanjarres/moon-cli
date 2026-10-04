@@ -3,6 +3,11 @@
 Trabajo de Sistemas Operativos de Pablo Manjarres y Valentina Barbosa. El código
 está en `cat_editor.c`; se entra desde el shell con `edit`.
 
+El editor integra en el shell de clase los cinco comandos base y la inserción
+y búsqueda exigidas para dos integrantes. Usa llamadas POSIX para manejar
+archivos. La vista con cursor y la barra permiten editar y ejecutar órdenes
+sin ocultar el texto.
+
 ## Uso
 
 `edit archivo.txt` abre el archivo en pantalla completa con líneas numeradas.
@@ -62,10 +67,23 @@ para localizar líneas y, después de `d` o `i`, escribe el resultado desde el
 inicio y ajusta su longitud con `ftruncate`. En pantalla completa, `Doc`
 guarda un arreglo dinámico de líneas; `Ctrl+O` las reúne y escribe el archivo.
 La barra y el modo de líneas comparten `ed_execute` y las mismas operaciones
-de archivo. Los resultados de la barra se muestran en un área acotada;
-el documento permanece visible y se actualiza después de cada cambio.
+de archivo y la protección de cambios sin guardar, evitando duplicar las reglas
+de las órdenes.
 `tcgetattr` y `tcsetattr` permiten leer teclas una a una y restaurar el
 terminal al salir.
+
+`Doc` usa `char **line` para acceder por índice. `count` registra las líneas
+usadas y `cap` los espacios reservados: empieza con 32 y duplica la capacidad
+cuando se llena, evitando ampliar el arreglo por cada línea. Cada línea tiene
+su propia reserva para sustituirla sin copiar el documento. En `ed_visual`,
+`Doc d` vive en la pila (`stack`); el arreglo y las líneas están en el `heap`
+y se liberan al salir. Las operaciones de archivo usan un búfer continuo
+para desplazar y escribir bytes.
+
+La barra reserva 2048 bytes para entrada y 4096 para resultados. Indica los
+resultados recortados; el desplazamiento vertical permite recorrer el documento
+con la barra visible.
+Estos límites acotan la memoria de la interfaz; el documento usa memoria dinámica.
 
 Se eligió cargar el texto en memoria porque simplifica las operaciones por
 línea. Editar solo en disco usaría menos RAM, pero complicaría mover la cola
