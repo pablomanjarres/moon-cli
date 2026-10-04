@@ -94,20 +94,41 @@ static int ed_write_all(int fd, const char *buf, size_t len)
     return 0;
 }
 
-static int ed_escape_sequence(char seq[2], int *pending)
+enum { ED_ESC_PREFIX = 1, ED_ESC_CSI, ED_ESC_PARAMS };
+enum { ED_KEY_CANCEL, ED_KEY_SEQUENCE, ED_KEY_WAIT };
+
+static int ed_escape_sequence(char *key, int *pending, int *state)
 {
-    for (int i = 0; i < 2; i++) {
-        struct pollfd input = {0, POLLIN, 0};
-        int ready;
-        do { ready = poll(&input, 1, 30); } while (ready == -1 && errno == EINTR);
-        if (ready == -1) { ed_error("poll"); return -1; }
-        if (!ready) return 0;
-        ssize_t n = ed_read(0, &seq[i], 1);
-        if (n == -1) { ed_error("read"); return -1; }
-        if (n != 1) return 0;
-        if (i == 0 && seq[0] != '[') { *pending = (unsigned char)seq[0]; return 0; }
+    for (int bytes = 0; bytes < 32; bytes++) {
+        unsigned char c;
+        if (*pending != -1) { c = (unsigned char)*pending; *pending = -1; }
+        else {
+            struct pollfd input = {0, POLLIN, 0};
+            int ready;
+            int timeout = *state == ED_ESC_PREFIX ? 250 : 30;
+            do { ready = poll(&input, 1, timeout); } while (ready == -1 && errno == EINTR);
+            if (ready == -1) { ed_error("poll"); return -1; }
+            /* Keep the state so a delayed prefix/final byte cannot become text. */
+            if (!ready) return *state == ED_ESC_PREFIX ? ED_KEY_CANCEL : ED_KEY_WAIT;
+            ssize_t n = ed_read(0, &c, 1);
+            if (n == -1) { ed_error("read"); return -1; }
+            if (n != 1) { *state = 0; return ED_KEY_CANCEL; }
+        }
+        if (*state == ED_ESC_PREFIX) {
+            if (c == '[') { *state = ED_ESC_CSI; continue; }
+        } else {
+            if (c >= 0x40 && c <= 0x7e) {
+                *key = *state == ED_ESC_CSI ? (char)c : '\0';
+                *state = 0;
+                return ED_KEY_SEQUENCE;
+            }
+            if (c >= 0x20 && c <= 0x3f) { *state = ED_ESC_PARAMS; continue; }
+        }
+        *state = 0;
+        *pending = c;
+        return ED_KEY_CANCEL;
     }
-    return 1;
+    return ED_KEY_WAIT;
 }
 
 static int ed_close(void)
@@ -684,6 +705,7 @@ static int ed_visual(char *path, size_t path_size)
     const char *notice = NULL;
     EdBar bar = {0};
     int pending = -1;
+    int escape_state = 0;
 
     for (;;) {
         int rows, cols;
@@ -701,6 +723,29 @@ static int ed_visual(char *path, size_t path_size)
         else n = ed_read(0, &c, 1);
         if (n == -1) { ed_error("read"); rc = 1; break; }
         if (n == 0) break;
+
+        if (c == 27 || escape_state) {
+            char key = '\0';
+            if (c == 27) escape_state = ED_ESC_PREFIX;
+            else pending = (unsigned char)c;
+            int sequence = ed_escape_sequence(&key, &pending, &escape_state);
+            if (sequence == -1) { rc = 1; break; }
+            if (sequence == ED_KEY_CANCEL) {
+                bar.focused = 0;
+                bar.used = 0; bar.command[0] = '\0';
+                if (pending == -1 || pending == 27) continue;
+                c = (char)pending; pending = -1;
+            } else {
+                if (sequence == ED_KEY_WAIT || bar.focused) continue;
+                if (key == 'A' && cy > 0) cy--;
+                else if (key == 'B' && cy < d.count - 1) cy++;
+                else if (key == 'C') cx++;
+                else if (key == 'D' && cx > 0) cx--;
+                int ll = (int)strlen(d.line[cy]);
+                if (cx > ll) cx = ll;
+                continue;
+            }
+        }
 
         if (c == 24) break;
 
@@ -720,7 +765,7 @@ static int ed_visual(char *path, size_t path_size)
             continue;
         }
 
-        if (bar.focused && c != 27) {
+        if (bar.focused) {
             if (c == '\r' || c == '\n') {
                 if (!bar.used) continue;
                 bar.feedback = (EdFeedback){0};
@@ -747,26 +792,6 @@ static int ed_visual(char *path, size_t path_size)
                     bar.command[bar.used] = '\0';
                 }
             }
-            continue;
-        }
-
-        if (c == 27) {
-            char seq[2];
-            int sequence = ed_escape_sequence(seq, &pending);
-            if (sequence == -1) { rc = 1; break; }
-            if (!sequence) {
-                bar.focused = 0;
-                bar.used = 0; bar.command[0] = '\0';
-                continue;
-            }
-            if (bar.focused) continue;
-            if (seq[0] != '[') continue;
-            if (seq[1] == 'A' && cy > 0) cy--;
-            else if (seq[1] == 'B' && cy < d.count - 1) cy++;
-            else if (seq[1] == 'C') cx++;
-            else if (seq[1] == 'D' && cx > 0) cx--;
-            int ll = (int)strlen(d.line[cy]);
-            if (cx > ll) cx = ll;
             continue;
         }
 
