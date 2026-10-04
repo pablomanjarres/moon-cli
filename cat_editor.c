@@ -635,8 +635,8 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
         sc_row(&s, tmp, cols, 1, 1);
     }
     if (notice) snprintf(tmp, sizeof tmp, "%s", notice);
-    else snprintf(tmp, sizeof tmp, "^L commands  ^O save  ^X exit  %d/%d %s",
-                  cy + 1, d->count, dirty ? "modified" : "saved");
+    else snprintf(tmp, sizeof tmp, "^L commands  ^O save  ^X %s  %d/%d %s",
+                  dirty ? "discard" : "exit", cy + 1, d->count, dirty ? "modified" : "saved");
     if (rows > 1) sc_row(&s, tmp, cols, 1, 1);
     const char *prefix = "Command: ";
     size_t room = cols > 9 ? (size_t)cols - 9 : (size_t)cols;
