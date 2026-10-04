@@ -875,7 +875,6 @@ static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *
     int kind = -1;
     for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++)
         if (strcmp(name, ed_commands[i].name) == 0) kind = ed_commands[i].kind;
-    if (kind == ED_CLOSE) return ED_QUIT;
     if (kind == -1 && strcmp(name, "v") != 0) {
         ed_report("  unknown command: %s; use help\n", name);
         return 1;
@@ -884,6 +883,7 @@ static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *
         ed_report("save with ^O before file commands\n");
         return 1;
     }
+    if (kind == ED_CLOSE) return ED_QUIT;
     if (kind == ED_OPEN) {
         if (strlen(arg) >= path_size) { ed_report("file path too long\n"); return 1; }
         int rc = ed_open(arg);
