@@ -83,6 +83,7 @@ para desplazar y escribir bytes.
 La barra reserva 2048 bytes para entrada y 4096 para resultados. Indica los
 resultados recortados; el desplazamiento vertical permite recorrer el documento
 con la barra visible.
+Estos límites acotan la memoria de la interfaz; el documento usa memoria dinámica.
 
 Se eligió cargar el texto en memoria porque simplifica las operaciones por
 línea. Editar solo en disco usaría menos RAM, pero complicaría mover la cola
