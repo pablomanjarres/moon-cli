@@ -340,8 +340,10 @@ def literal_after_escape(folder, literal):
         session.visual("\x0c")
         session.visual("a")
         session.visual("\x1b")
+        session.raw()
         for key in literal:
             session.visual(key)
+        assert file.read_bytes() == b"alpha\nbeta\n", "literal typing saved without Ctrl+O"
         frame = session.send("\x0f", r"saved file[\s\S]*\x1b\[\?25h$", raw=True)
         wanted = (literal + "alpha\nbeta\n").encode()
         assert file.read_bytes() == wanted, "Escape consumed literal text: " + repr(file.read_bytes())
