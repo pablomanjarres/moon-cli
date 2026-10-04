@@ -5,14 +5,21 @@ está en `cat_editor.c`; se entra desde el shell con `edit`.
 
 ## Uso
 
-`edit` abre el modo de líneas. `edit archivo.txt` abre el mismo archivo en una
-vista de pantalla completa. El pie muestra los siete comandos; `Ctrl+L` abre
-el modo de líneas con el mismo archivo. Si hay cambios sin guardar, primero
-se debe usar `Ctrl+O`: cambiar de modo no guarda ni descarta el texto.
+`edit archivo.txt` abre el archivo en pantalla completa con líneas numeradas.
+El pie muestra los siete comandos. `Ctrl+L` enfoca una barra sin ocultar el archivo;
+se escribe una orden y se pulsa Enter. El resultado aparece junto al documento
+y la barra queda lista para la siguiente orden. `Ctrl+L` vuelve a la edición
+con el cursor. Escape cancela la orden pendiente y devuelve el foco al documento.
 
-La ayuda aparece al entrar al modo de líneas y se puede repetir con `help`
-o `?`, incluso sin archivo abierto. `v` vuelve a la vista visual. Allí,
-`Ctrl+X` regresa al modo de líneas; `q` cierra el archivo y vuelve a `moon`.
+Las órdenes `a`, `d` e `i` escriben sus cambios en el archivo y actualizan la
+vista. El texto escrito directamente con el cursor se guarda con `Ctrl+O`.
+Si hay cambios pendientes, hay que guardarlos antes de ejecutar las órdenes
+de archivo; abrir la barra no los guarda ni los descarta.
+
+`edit` sin nombre de archivo conserva el modo de líneas. Su ayuda aparece
+al entrar y se puede repetir con `help` o `?`, incluso sin archivo abierto.
+`v` abre la vista visual. Allí, `Ctrl+X` regresa al modo de líneas;
+`q` cierra el archivo y vuelve a `moon`.
 Si se entró directamente con `edit archivo.txt`, `Ctrl+X` vuelve a `moon`.
 `Ctrl+X` no guarda cambios.
 
@@ -53,6 +60,9 @@ El modo de líneas guarda el descriptor en `ed_fd`. Lee el archivo completo
 para localizar líneas y, después de `d` o `i`, escribe el resultado desde el
 inicio y ajusta su longitud con `ftruncate`. En pantalla completa, `Doc`
 guarda un arreglo dinámico de líneas; `Ctrl+O` las reúne y escribe el archivo.
+La barra y el modo de líneas comparten `ed_execute` y las mismas operaciones
+de archivo. Los resultados de la barra se muestran en un área acotada;
+el documento permanece visible y se actualiza después de cada cambio.
 `tcgetattr` y `tcsetattr` permiten leer teclas una a una y restaurar el
 terminal al salir.
 
@@ -88,5 +98,6 @@ se guardan solo con `Ctrl+O`.
 En Linux: `make && sh tests/run_editor_tests.sh`. El script comprueba los
 comandos de ambos niveles, fallos de apertura, archivos sin salto final y
 edición visual mediante una terminal seudográfica.
-También verifica los comandos desde la vista visual, la protección del
-texto sin guardar y la restauración del terminal al cambiar de modo.
+También verifica que la barra mantenga el archivo visible, que las órdenes
+actualicen su contenido, que los errores conserven el archivo anterior,
+la protección del texto sin guardar y la restauración del terminal al salir.
