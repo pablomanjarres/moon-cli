@@ -253,7 +253,8 @@ def cancel_command(folder):
         text = check_layout(session.visual("\x1b"), 80)
         check_view(text, file, ("alpha", "beta"))
         assert file.read_bytes() == b"alpha\nbeta\n", "ESC executed pending command"
-        text = check_layout(session.visual("Z"), 80)
+        frame = session.send("Z", r"Zalpha[\s\S]*\x1b\[\?25h$", raw=True)
+        text = check_layout(frame, 80)
         check_view(text, file, ("Zalpha", "beta"))
         assert file.read_bytes() == b"alpha\nbeta\n", "ESC saved visual edits"
         session.visual("\x0c")
@@ -360,7 +361,7 @@ if __name__ == "__main__":
         cancel_command(folder)
         dirty_quit(folder)
         queued_escape(folder)
-        for prefix, direction in ((0.06, 0), (0.2, 0), (0, 0.06), (0, 0.2), (0.2, 0.2)):
+        for prefix, direction in ((0.06, 0), (0.2, 0), (0, 0.06), (0, 0.2), (0.2, 0.2), (0.35, 0)):
             delayed_arrow(folder, prefix, direction)
         for width in (80, 50):
             commands_from_visual(folder, width)
