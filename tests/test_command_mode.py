@@ -285,6 +285,51 @@ def dirty_quit(folder):
         session.close()
 
 
+def delayed_arrow(folder, prefix_delay, direction_delay):
+    file = folder / "arrow.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        os.write(session.fd, b"\x1b" if prefix_delay else b"\x1b[")
+        if prefix_delay:
+            time.sleep(prefix_delay)
+            os.write(session.fd, b"[")
+        time.sleep(direction_delay)
+        os.write(session.fd, b"B")
+        # A distinct bar frame is a barrier after all fragmented input bytes.
+        frame = session.send("\x0c", r"Command: [^\r\n]*\x1b\[\?25h$", raw=True)
+        check_view(check_layout(frame, 80), file, ("alpha", "beta"))
+        session.raw()
+        session.visual("\x0c")
+        text = check_layout(session.visual("Z"), 80)
+        check_view(text, file, ("alpha", "Zbeta"))
+        assert file.read_bytes() == b"alpha\nbeta\n", "fragmented arrow saved text"
+        session.send("\x18", SHELL)
+        session.restored()
+    finally:
+        session.close()
+
+
+def queued_escape(folder):
+    file = folder / "queued-escape.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("\x0c")
+        session.visual("a")
+        os.write(session.fd, b"\x1bZ")
+        frame = session.send("\x0c", r"Command: [^\r\n]*\x1b\[\?25h$", raw=True)
+        check_view(check_layout(frame, 80), file, ("Zalpha", "beta"))
+        assert file.read_bytes() == b"alpha\nbeta\n", "queued Escape saved text"
+        session.visual("\x0f")
+        session.command("q", exits=True)
+        session.restored()
+    finally:
+        session.close()
+
+
 def narrow_and_long_line(folder):
     file = folder / "long.txt"
     file.write_bytes(b"x" * 160 + b"\n")
@@ -314,6 +359,9 @@ if __name__ == "__main__":
         legacy_long_match(folder)
         cancel_command(folder)
         dirty_quit(folder)
+        queued_escape(folder)
+        for prefix, direction in ((0.06, 0), (0.2, 0), (0, 0.06), (0, 0.2), (0.2, 0.2)):
+            delayed_arrow(folder, prefix, direction)
         for width in (80, 50):
             commands_from_visual(folder, width)
         dirty_and_return(folder)
