@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 
 static int ed_fd = -1;
 
@@ -91,6 +92,22 @@ static int ed_write_all(int fd, const char *buf, size_t len)
         off += (size_t)n;
     }
     return 0;
+}
+
+static int ed_escape_sequence(char seq[2], int *pending)
+{
+    for (int i = 0; i < 2; i++) {
+        struct pollfd input = {0, POLLIN, 0};
+        int ready;
+        do { ready = poll(&input, 1, 30); } while (ready == -1 && errno == EINTR);
+        if (ready == -1) { ed_error("poll"); return -1; }
+        if (!ready) return 0;
+        ssize_t n = ed_read(0, &seq[i], 1);
+        if (n == -1) { ed_error("read"); return -1; }
+        if (n != 1) return 0;
+        if (i == 0 && seq[0] != '[') { *pending = (unsigned char)seq[0]; return 0; }
+    }
+    return 1;
 }
 
 static int ed_close(void)
@@ -669,6 +686,7 @@ static int ed_visual(char *path, size_t path_size)
     int cy = 0, cx = 0, rowoff = 0, dirty = 0, rc = 0;
     const char *notice = NULL;
     EdBar bar = {0};
+    int pending = -1;
 
     for (;;) {
         int rows, cols;
@@ -681,7 +699,9 @@ static int ed_visual(char *path, size_t path_size)
         if (ed_draw(&d, path, cy, cx, rowoff, dirty, notice, &bar) == -1) { rc = 1; break; }
 
         char c;
-        ssize_t n = ed_read(0, &c, 1);
+        ssize_t n;
+        if (pending != -1) { c = (char)pending; pending = -1; n = 1; }
+        else n = ed_read(0, &c, 1);
         if (n == -1) { ed_error("read"); rc = 1; break; }
         if (n == 0) break;
 
@@ -735,12 +755,13 @@ static int ed_visual(char *path, size_t path_size)
 
         if (c == 27) {
             char seq[2];
-            n = ed_read(0, &seq[0], 1);
-            if (n == -1) { ed_error("read"); rc = 1; break; }
-            if (n != 1) break;
-            n = ed_read(0, &seq[1], 1);
-            if (n == -1) { ed_error("read"); rc = 1; break; }
-            if (n != 1) break;
+            int sequence = ed_escape_sequence(seq, &pending);
+            if (sequence == -1) { rc = 1; break; }
+            if (!sequence) {
+                bar.focused = 0;
+                bar.used = 0; bar.command[0] = '\0';
+                continue;
+            }
             if (bar.focused) continue;
             if (seq[0] != '[') continue;
             if (seq[1] == 'A' && cy > 0) cy--;
