@@ -455,13 +455,10 @@ static int doc_load(Doc *d)
 
     d->line = NULL; d->count = 0; d->cap = 0;
 
-    size_t i = 0;
-    while (i < len) {
-        size_t j = i;
-        while (j < len && buf[j] != '\n') j++;
-        if (doc_push(d, buf + i, j - i) == -1) { free(buf); doc_free(d); return -1; }
-        i = j + 1;
-    }
+    size_t at = 0, line_len;
+    char *line;
+    while ((line = ed_next_line(buf, len, &at, &line_len)))
+        if (doc_push(d, line, line_len) == -1) { free(buf); doc_free(d); return -1; }
     if (d->count == 0 && doc_push(d, "", 0) == -1) { free(buf); doc_free(d); return -1; }
 
     free(buf);
