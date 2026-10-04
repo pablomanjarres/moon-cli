@@ -576,7 +576,7 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
     }
     if (rows > 3) sc_row(&s, title, cols, 1, 1);
     int digits = 1;
-    for (int n = d->count; n >= 10; n /= 10) digits++;
+    for (int n = d->count; n >= 10 && digits < 10; n /= 10) digits++;
     int gutter = digits + 1;
     if (gutter >= cols) gutter = 0;
 
