@@ -4,23 +4,48 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 
 static int ed_fd = -1;
 
-enum { ED_COMMANDS = 2 };
+typedef struct {
+    char text[4096];
+    size_t len;
+    int clipped;
+    int matches;
+} EdFeedback;
+
+typedef struct {
+    char command[2048];
+    size_t used;
+    int focused;
+    EdFeedback feedback;
+} EdBar;
+
+static EdFeedback *ed_feedback = NULL;
+static int ed_out(const char *buf, size_t len);
+static void ed_report(const char *format, ...);
+static void ed_error(const char *name);
+
+enum { ED_VIEW = 2, ED_QUIT };
+enum { ED_OPEN, ED_PRINT, ED_APPEND, ED_DELETE, ED_INSERT, ED_SEARCH, ED_CLOSE };
+
+static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *refresh);
 
 static const struct {
     const char *name, *args, *description;
+    int kind;
 } ed_commands[] = {
-    {"o", "file",   "open or create a file"},
-    {"p", "[n]",    "print all text or line n"},
-    {"a", "text",   "append a line"},
-    {"d", "n",      "delete line n"},
-    {"i", "n text", "insert a line at n"},
-    {"s", "word",   "find matching lines"},
-    {"q", "",       "close the file and return to moon"},
+    {"o", "file",   "open or create a file", ED_OPEN},
+    {"p", "[n]",    "print all text or line n", ED_PRINT},
+    {"a", "text",   "append a line", ED_APPEND},
+    {"d", "n",      "delete line n", ED_DELETE},
+    {"i", "n text", "insert a line at n", ED_INSERT},
+    {"s", "word",   "find matching lines", ED_SEARCH},
+    {"q", "",       "close the file and return to moon", ED_CLOSE},
 };
 
 static void ed_commands_text(char *buf, size_t len, int compact)
@@ -38,11 +63,11 @@ static void ed_commands_text(char *buf, size_t len, int compact)
 
 static void ed_help(void)
 {
-    printf("  editor commands:\n");
+    ed_report("  editor commands:\n");
     for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++)
-        printf("  %s %-6s  %s\n", ed_commands[i].name, ed_commands[i].args,
+        ed_report("  %s %-6s  %s\n", ed_commands[i].name, ed_commands[i].args,
                ed_commands[i].description);
-    printf("  v         full-screen view (^O save, ^L commands, ^X return)\n"
+    ed_report("  v         full-screen view (^O save, ^L commands, ^X return)\n"
            "  help / ?  show these commands\n");
 }
 
@@ -61,7 +86,7 @@ static int ed_write_all(int fd, const char *buf, size_t len)
         if (n == -1 && errno == EINTR) continue;
         if (n <= 0) {
             if (n == 0) errno = EIO;
-            perror("write");
+            ed_error("write");
             return -1;
         }
         off += (size_t)n;
@@ -69,11 +94,27 @@ static int ed_write_all(int fd, const char *buf, size_t len)
     return 0;
 }
 
+static int ed_escape_sequence(char seq[2], int *pending)
+{
+    for (int i = 0; i < 2; i++) {
+        struct pollfd input = {0, POLLIN, 0};
+        int ready;
+        do { ready = poll(&input, 1, 30); } while (ready == -1 && errno == EINTR);
+        if (ready == -1) { ed_error("poll"); return -1; }
+        if (!ready) return 0;
+        ssize_t n = ed_read(0, &seq[i], 1);
+        if (n == -1) { ed_error("read"); return -1; }
+        if (n != 1) return 0;
+        if (i == 0 && seq[0] != '[') { *pending = (unsigned char)seq[0]; return 0; }
+    }
+    return 1;
+}
+
 static int ed_close(void)
 {
     if (ed_fd == -1) return 0;
     int rc = close(ed_fd);
-    if (rc == -1) perror("close");
+    if (rc == -1) ed_error("close");
     ed_fd = -1;
     return rc;
 }
@@ -81,16 +122,16 @@ static int ed_close(void)
 static char *ed_slurp(size_t *len)
 {
     off_t end = lseek(ed_fd, 0, SEEK_END);
-    if (end == -1) { perror("lseek"); return NULL; }
-    if (lseek(ed_fd, 0, SEEK_SET) == -1) { perror("lseek"); return NULL; }
+    if (end == -1) { ed_error("lseek"); return NULL; }
+    if (lseek(ed_fd, 0, SEEK_SET) == -1) { ed_error("lseek"); return NULL; }
 
     char *buf = malloc((size_t)end + 1);
-    if (!buf) { perror("malloc"); return NULL; }
+    if (!buf) { ed_error("malloc"); return NULL; }
 
     size_t got = 0;
     while (got < (size_t)end) {
         ssize_t n = ed_read(ed_fd, buf + got, (size_t)end - got);
-        if (n == -1) { perror("read"); free(buf); return NULL; }
+        if (n == -1) { ed_error("read"); free(buf); return NULL; }
         if (n == 0) break;
         got += (size_t)n;
     }
@@ -102,26 +143,61 @@ static char *ed_slurp(size_t *len)
 
 static int ed_out(const char *buf, size_t len)
 {
+    if (ed_feedback) {
+        size_t room = sizeof ed_feedback->text - ed_feedback->len - 1;
+        size_t n = len < room ? len : room;
+        memcpy(ed_feedback->text + ed_feedback->len, buf, n);
+        ed_feedback->len += n;
+        ed_feedback->text[ed_feedback->len] = '\0';
+        if (n < len) ed_feedback->clipped = 1;
+        return 0;
+    }
     return ed_write_all(1, buf, len);
+}
+
+static void ed_report(const char *format, ...)
+{
+    char buf[512];
+    va_list args;
+    va_start(args, format);
+    if (!ed_feedback) {
+        vprintf(format, args);
+        va_end(args);
+        return;
+    }
+    int n = vsnprintf(buf, sizeof buf, format, args);
+    va_end(args);
+    if (n < 0) return;
+    if ((size_t)n >= sizeof buf && ed_feedback) ed_feedback->clipped = 1;
+    ed_out(buf, (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1);
+}
+
+static void ed_error(const char *name)
+{
+    int saved = errno;
+    if (ed_feedback) ed_report("%s: %s\n", name, strerror(saved));
+    errno = saved;
+    perror(name);
+}
+
+static char *ed_next_line(char *buf, size_t len, size_t *at, size_t *out_len)
+{
+    if (*at >= len) return NULL;
+    size_t i = *at, j = i;
+    while (j < len && buf[j] != '\n') j++;
+    *out_len = j - i;
+    *at = j < len ? j + 1 : j;
+    return buf + i;
 }
 
 static char *ed_line(char *buf, size_t len, int n, size_t *out_len)
 {
     if (n < 1) return NULL;
-
-    size_t i = 0;
-    int cur = 1;
-    while (i < len && cur < n) {
-        if (buf[i] == '\n') cur++;
-        i++;
-    }
-    if (cur != n || i >= len) return NULL;
-
-    size_t j = i;
-    while (j < len && buf[j] != '\n') j++;
-
-    *out_len = j - i;
-    return buf + i;
+    size_t at = 0;
+    char *line;
+    for (int cur = 1; (line = ed_next_line(buf, len, &at, out_len)); cur++)
+        if (cur == n) return line;
+    return NULL;
 }
 
 static int ed_print(const char *arg)
@@ -132,7 +208,17 @@ static int ed_print(const char *arg)
 
     int rc = 0;
     if (!arg || !*arg) {
-        if (len) {
+        if (ed_feedback) {
+            ed_report("All file lines:\n");
+            size_t at = 0, ll;
+            int n = 1;
+            char *line;
+            while ((line = ed_next_line(buf, len, &at, &ll))) {
+                ed_report("%d  ", n++);
+                ed_out(line, ll);
+                ed_out("\n", 1);
+            }
+        } else if (len) {
             rc = ed_out(buf, len) == -1;
             if (!rc && buf[len - 1] != '\n') rc = ed_out("\n", 1) == -1;
         }
@@ -140,9 +226,10 @@ static int ed_print(const char *arg)
         size_t ll;
         char *l = ed_line(buf, len, atoi(arg), &ll);
         if (!l) {
-            printf("  %sno such line%s\n", C_WARN, C_OFF);
+            ed_report("  no such line\n");
             rc = 1;
         } else {
+            if (ed_feedback) ed_report("%d  ", atoi(arg));
             rc = ed_out(l, ll) == -1 || ed_out("\n", 1) == -1;
         }
     }
@@ -161,15 +248,15 @@ static int ed_append(const char *text)
     if (!text) text = "";
 
     off_t end = lseek(ed_fd, 0, SEEK_END);
-    if (end == -1) { perror("lseek"); return 1; }
+    if (end == -1) { ed_error("lseek"); return 1; }
 
     if (end > 0) {
         char last;
-        if (lseek(ed_fd, end - 1, SEEK_SET) == -1) { perror("lseek"); return 1; }
+        if (lseek(ed_fd, end - 1, SEEK_SET) == -1) { ed_error("lseek"); return 1; }
         ssize_t got = ed_read(ed_fd, &last, 1);
-        if (got == -1) { perror("read"); return 1; }
+        if (got == -1) { ed_error("read"); return 1; }
         if (got != 1) {
-            if (lseek(ed_fd, 0, SEEK_END) == -1) { perror("lseek"); return 1; }
+            if (lseek(ed_fd, 0, SEEK_END) == -1) { ed_error("lseek"); return 1; }
         } else if (last != '\n' && ed_write("\n", 1) == -1) {
             return 1;
         }
@@ -182,16 +269,16 @@ static int ed_append(const char *text)
 
 static int ed_save(const char *buf, size_t len)
 {
-    if (lseek(ed_fd, 0, SEEK_SET) == -1) { perror("lseek"); return -1; }
+    if (lseek(ed_fd, 0, SEEK_SET) == -1) { ed_error("lseek"); return -1; }
     if (ed_write(buf, len) == -1) return -1;
-    if (ftruncate(ed_fd, (off_t)len) == -1) { perror("ftruncate"); return -1; }
+    if (ftruncate(ed_fd, (off_t)len) == -1) { ed_error("ftruncate"); return -1; }
     return 0;
 }
 
 static int ed_delete(const char *arg)
 {
     if (!arg || !*arg) {
-        printf("  usage: d <n>\n");
+        ed_report("  usage: d <n>\n");
         return 1;
     }
 
@@ -202,7 +289,7 @@ static int ed_delete(const char *arg)
     size_t ll;
     char *l = ed_line(buf, len, atoi(arg), &ll);
     if (!l) {
-        printf("  %sno such line%s\n", C_WARN, C_OFF);
+        ed_report("  no such line\n");
         free(buf);
         return 1;
     }
@@ -219,7 +306,7 @@ static int ed_delete(const char *arg)
 static int ed_insert(char *arg)
 {
     if (!arg || !*arg) {
-        printf("  usage: i <n> <text>\n");
+        ed_report("  usage: i <n> <text>\n");
         return 1;
     }
 
@@ -232,7 +319,7 @@ static int ed_insert(char *arg)
 
     int n = atoi(arg);
     if (n < 1) {
-        printf("  usage: i <n> <text>\n");
+        ed_report("  usage: i <n> <text>\n");
         return 1;
     }
 
@@ -246,7 +333,7 @@ static int ed_insert(char *arg)
 
     size_t tl = strlen(text);
     char *nb = malloc(len + tl + 2);
-    if (!nb) { perror("malloc"); free(buf); return 1; }
+    if (!nb) { ed_error("malloc"); free(buf); return 1; }
 
     size_t p = 0;
     memcpy(nb, buf, at);
@@ -267,7 +354,7 @@ static int ed_insert(char *arg)
 static int ed_search(const char *word)
 {
     if (!word || !*word) {
-        printf("  usage: s <word>\n");
+        ed_report("  usage: s <word>\n");
         return 1;
     }
 
@@ -276,26 +363,23 @@ static int ed_search(const char *word)
     if (!buf) return 1;
 
     int hits = 0;
-    size_t i = 0;
+    size_t at = 0, ll;
     int n = 1;
+    char *line;
 
-    while (i < len) {
-        size_t j = i;
-        while (j < len && buf[j] != '\n') j++;
-
-        char save = buf[j];
-        buf[j] = '\0';
-        if (strstr(buf + i, word)) {
-            printf("  %s%d%s  %s\n", C_ACCENT, n, C_OFF, buf + i);
+    while ((line = ed_next_line(buf, len, &at, &ll))) {
+        char save = line[ll];
+        line[ll] = '\0';
+        if (strstr(line, word)) {
+            ed_report("  %d  %s\n", n, line);
             hits++;
         }
-        buf[j] = save;
-
-        i = j + 1;
+        line[ll] = save;
         n++;
     }
 
-    if (!hits) printf("  %snot found%s\n", C_MUTED, C_OFF);
+    if (ed_feedback) ed_feedback->matches = hits;
+    if (!hits) ed_report("  not found\n");
 
     free(buf);
     return hits ? 0 : 1;
@@ -313,7 +397,7 @@ static int ed_raw = 0;
 
 static int ed_raw_on(void)
 {
-    if (tcgetattr(0, &ed_saved_term) == -1) { perror("tcgetattr"); return -1; }
+    if (tcgetattr(0, &ed_saved_term) == -1) { ed_error("tcgetattr"); return -1; }
 
     struct termios t = ed_saved_term;
     t.c_lflag &= (tcflag_t)~(ECHO | ICANON | ISIG | IEXTEN);
@@ -322,7 +406,7 @@ static int ed_raw_on(void)
     t.c_cc[VMIN] = 1;
     t.c_cc[VTIME] = 0;
 
-    if (tcsetattr(0, TCSAFLUSH, &t) == -1) { perror("tcsetattr"); return -1; }
+    if (tcsetattr(0, TCSAFLUSH, &t) == -1) { ed_error("tcsetattr"); return -1; }
     ed_raw = 1;
     return 0;
 }
@@ -331,7 +415,7 @@ static int ed_raw_off(void)
 {
     if (!ed_raw) return 0;
     if (tcsetattr(0, TCSAFLUSH, &ed_saved_term) == -1) {
-        perror("tcsetattr");
+        ed_error("tcsetattr");
         return -1;
     }
     ed_raw = 0;
@@ -351,12 +435,12 @@ static int doc_push(Doc *d, const char *src, size_t n)
     if (d->count == d->cap) {
         int cap = d->cap ? d->cap * 2 : 32;
         char **nl = realloc(d->line, (size_t)cap * sizeof *nl);
-        if (!nl) { perror("realloc"); return -1; }
+        if (!nl) { ed_error("realloc"); return -1; }
         d->line = nl;
         d->cap = cap;
     }
     char *copy = malloc(n + 1);
-    if (!copy) { perror("malloc"); return -1; }
+    if (!copy) { ed_error("malloc"); return -1; }
     memcpy(copy, src, n);
     copy[n] = '\0';
     d->line[d->count++] = copy;
@@ -371,13 +455,10 @@ static int doc_load(Doc *d)
 
     d->line = NULL; d->count = 0; d->cap = 0;
 
-    size_t i = 0;
-    while (i < len) {
-        size_t j = i;
-        while (j < len && buf[j] != '\n') j++;
-        if (doc_push(d, buf + i, j - i) == -1) { free(buf); doc_free(d); return -1; }
-        i = j + 1;
-    }
+    size_t at = 0, line_len;
+    char *line;
+    while ((line = ed_next_line(buf, len, &at, &line_len)))
+        if (doc_push(d, line, line_len) == -1) { free(buf); doc_free(d); return -1; }
     if (d->count == 0 && doc_push(d, "", 0) == -1) { free(buf); doc_free(d); return -1; }
 
     free(buf);
@@ -390,7 +471,7 @@ static int doc_store(Doc *d)
     for (int i = 0; i < d->count; i++) total += strlen(d->line[i]) + 1;
 
     char *buf = malloc(total ? total : 1);
-    if (!buf) { perror("malloc"); return -1; }
+    if (!buf) { ed_error("malloc"); return -1; }
 
     size_t p = 0;
     for (int i = 0; i < d->count; i++) {
@@ -416,7 +497,7 @@ typedef struct {
 static void sc_add(Screen *s, const char *src, size_t n)
 {
     if (s->failed) return;
-    if (n > SIZE_MAX - s->len) { errno = ENOMEM; perror("realloc"); s->failed = 1; return; }
+    if (n > SIZE_MAX - s->len) { errno = ENOMEM; ed_error("realloc"); s->failed = 1; return; }
     if (s->len + n > s->cap) {
         size_t cap = (s->cap ? s->cap : 4096);
         while (cap < s->len + n) {
@@ -424,7 +505,7 @@ static void sc_add(Screen *s, const char *src, size_t n)
             cap *= 2;
         }
         char *nb = realloc(s->buf, cap);
-        if (!nb) { perror("realloc"); s->failed = 1; return; }
+        if (!nb) { ed_error("realloc"); s->failed = 1; return; }
         s->buf = nb;
         s->cap = cap;
     }
@@ -444,7 +525,25 @@ static void sc_row(Screen *s, const char *text, int cols, int inverse, int next)
     if (next) sc_str(s, "\r\n");
 }
 
-static int ed_body_rows(int rows) { return rows > 3 ? rows - 3 : 0; }
+static int ed_result_rows(int rows, int cols, EdFeedback *feedback, int *clipped)
+{
+    int limit = rows > 8 ? 4 : rows > 5 ? rows - 5 : 0;
+    int count = 0, cut = feedback->clipped;
+    size_t at = 0, len;
+    while (ed_next_line(feedback->text, feedback->len, &at, &len)) {
+        count++;
+        if (len + 8 > (size_t)cols) cut = 1;
+    }
+    if (count > limit) cut = 1;
+    if (clipped) *clipped = cut;
+    int total = count ? count + cut : 0;
+    return total < limit ? total : limit;
+}
+
+static int ed_body_rows(int rows, int results)
+{
+    return rows > 4 + results ? rows - 4 - results : 0;
+}
 
 static void ed_winsize(int *rows, int *cols)
 {
@@ -457,24 +556,39 @@ static void ed_winsize(int *rows, int *cols)
 }
 
 static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
-                   int dirty, const char *notice)
+                   int dirty, const char *notice, EdBar *bar)
 {
     int rows, cols;
     ed_winsize(&rows, &cols);
 
-    int body = ed_body_rows(rows);
+    int clipped;
+    int results = ed_result_rows(rows, cols, &bar->feedback, &clipped);
+    int body = ed_body_rows(rows, results);
     Screen s = {NULL, 0, 0, 0};
     char tmp[256];
 
     sc_str(&s, "\x1b[?25l\x1b[H\x1b[2J");
 
-    if (rows > 2) sc_row(&s, path, cols, 1, 1);
+    const char *title = path;
+    if (strlen(path) > (size_t)cols) {
+        const char *base = strrchr(path, '/');
+        if (base) title = base + 1;
+    }
+    if (rows > 3) sc_row(&s, title, cols, 1, 1);
+    int digits = 1;
+    for (int n = d->count; n >= 10 && digits < 10; n /= 10) digits++;
+    int gutter = digits + 1;
+    if (gutter >= cols) gutter = 0;
 
     for (int y = 0; y < body; y++) {
         int i = y + rowoff;
         if (i < d->count) {
+            if (gutter) {
+                snprintf(tmp, sizeof tmp, "%*d ", digits, i + 1);
+                sc_str(&s, tmp);
+            }
             size_t n = strlen(d->line[i]);
-            if ((int)n > cols) n = (size_t)cols;
+            if (n > (size_t)(cols - gutter)) n = (size_t)(cols - gutter);
             sc_add(&s, d->line[i], n);
         } else {
             sc_str(&s, "\x1b[38;2;107;126;168m~\x1b[m");
@@ -482,7 +596,19 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
         sc_str(&s, "\r\n");
     }
 
-    if (rows > 1) {
+    size_t at = 0, len;
+    for (int y = 0; y < results; y++) {
+        if (clipped && y == results - 1) {
+            if (bar->feedback.matches) snprintf(tmp, sizeof tmp,
+                "%d matches; results clipped", bar->feedback.matches);
+            else snprintf(tmp, sizeof tmp, "... results clipped");
+        } else {
+            char *line = ed_next_line(bar->feedback.text, bar->feedback.len, &at, &len);
+            snprintf(tmp, sizeof tmp, "Result: %.*s", (int)len, line ? line : "");
+        }
+        sc_row(&s, tmp, cols, 0, 1);
+    }
+    if (rows > 2) {
         ed_commands_text(tmp, sizeof tmp, 0);
         if (strlen(tmp) > (size_t)cols) ed_commands_text(tmp, sizeof tmp, 1);
         sc_row(&s, tmp, cols, 1, 1);
@@ -490,10 +616,18 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
     if (notice) snprintf(tmp, sizeof tmp, "%s", notice);
     else snprintf(tmp, sizeof tmp, "^L commands  ^O save  ^X exit  %d/%d %s",
                   cy + 1, d->count, dirty ? "modified" : "saved");
-    sc_row(&s, tmp, cols, 1, 0);
+    if (rows > 1) sc_row(&s, tmp, cols, 1, 1);
+    const char *prefix = "Command: ";
+    size_t room = cols > 9 ? (size_t)cols - 9 : (size_t)cols;
+    size_t start = bar->used > room ? bar->used - room : 0;
+    if (bar->focused) snprintf(tmp, sizeof tmp, "%s%s",
+                              cols > 9 ? prefix : "", bar->command + start);
+    else snprintf(tmp, sizeof tmp, "Editing; ^L commands");
+    sc_row(&s, tmp, cols, bar->focused, 0);
 
-    int cursor_row = body ? cy - rowoff + 2 : 1;
-    int cursor_col = cx < cols ? cx + 1 : cols;
+    int cursor_row = bar->focused ? rows : body ? cy - rowoff + 2 : 1;
+    int cursor_col = bar->focused ? (int)strlen(tmp) + 1 : cx + gutter + 1;
+    if (cursor_col > cols) cursor_col = cols;
     snprintf(tmp, sizeof tmp, "\x1b[%d;%dH\x1b[?25h", cursor_row, cursor_col);
     sc_str(&s, tmp);
 
@@ -505,13 +639,13 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
 static int line_insert(Doc *d, int at, const char *src, size_t n)
 {
     char *copy = malloc(n + 1);
-    if (!copy) { perror("malloc"); return -1; }
+    if (!copy) { ed_error("malloc"); return -1; }
     memcpy(copy, src, n);
     copy[n] = '\0';
     if (d->count == d->cap) {
         int cap = d->cap ? d->cap * 2 : 32;
         char **nl = realloc(d->line, (size_t)cap * sizeof *nl);
-        if (!nl) { perror("realloc"); free(copy); return -1; }
+        if (!nl) { ed_error("realloc"); free(copy); return -1; }
         d->line = nl;
         d->cap = cap;
     }
@@ -531,7 +665,7 @@ static void line_remove(Doc *d, int at)
 static int line_set(Doc *d, int at, const char *src, size_t n)
 {
     char *copy = malloc(n + 1);
-    if (!copy) { perror("malloc"); return -1; }
+    if (!copy) { ed_error("malloc"); return -1; }
     memcpy(copy, src, n);
     copy[n] = '\0';
     free(d->line[at]);
@@ -540,7 +674,7 @@ static int line_set(Doc *d, int at, const char *src, size_t n)
 }
 
 
-static int ed_visual(const char *path)
+static int ed_visual(char *path, size_t path_size)
 {
     Doc d;
     if (doc_load(&d) == -1) return 1;
@@ -548,45 +682,84 @@ static int ed_visual(const char *path)
 
     int cy = 0, cx = 0, rowoff = 0, dirty = 0, rc = 0;
     const char *notice = NULL;
+    EdBar bar = {0};
+    int pending = -1;
 
     for (;;) {
         int rows, cols;
         ed_winsize(&rows, &cols);
-        int body = ed_body_rows(rows);
+        int body = ed_body_rows(rows, ed_result_rows(rows, cols, &bar.feedback, NULL));
 
         if (body == 0 || cy < rowoff) rowoff = cy;
         else if (cy >= rowoff + body) rowoff = cy - body + 1;
 
-        if (ed_draw(&d, path, cy, cx, rowoff, dirty, notice) == -1) { rc = 1; break; }
+        if (ed_draw(&d, path, cy, cx, rowoff, dirty, notice, &bar) == -1) { rc = 1; break; }
 
         char c;
-        ssize_t n = ed_read(0, &c, 1);
-        if (n == -1) { perror("read"); rc = 1; break; }
+        ssize_t n;
+        if (pending != -1) { c = (char)pending; pending = -1; n = 1; }
+        else n = ed_read(0, &c, 1);
+        if (n == -1) { ed_error("read"); rc = 1; break; }
         if (n == 0) break;
 
         if (c == 24) break;
 
         if (c == 12) {
-            if (dirty) { notice = "save with ^O before commands"; continue; }
-            rc = ED_COMMANDS;
-            break;
+            bar.focused = !bar.focused;
+            notice = NULL;
+            continue;
         }
         notice = NULL;
 
         if (c == 15) {
-            if (doc_store(&d) == -1) { rc = 1; break; }
-            dirty = 0;
+            bar.feedback = (EdFeedback){0};
+            ed_feedback = &bar.feedback;
+            if (doc_store(&d) == -1) rc = 1;
+            else { dirty = 0; rc = 0; ed_report("saved file\n"); }
+            ed_feedback = NULL;
+            continue;
+        }
+
+        if (bar.focused && c != 27) {
+            if (c == '\r' || c == '\n') {
+                if (!bar.used) continue;
+                bar.feedback = (EdFeedback){0};
+                ed_feedback = &bar.feedback;
+                int refresh, status = ed_execute(bar.command, path, path_size, dirty, &refresh);
+                bar.used = 0; bar.command[0] = '\0';
+                if (status == ED_QUIT) { ed_feedback = NULL; rc = ED_QUIT; break; }
+                if (status == ED_VIEW) bar.focused = 0;
+                if (refresh) {
+                    Doc next;
+                    if (doc_load(&next) == -1) { ed_feedback = NULL; rc = 1; break; }
+                    doc_free(&d); d = next;
+                    if (refresh == 2) cy = cx = rowoff = 0;
+                    if (cy >= d.count) cy = d.count - 1;
+                    int len = (int)strlen(d.line[cy]);
+                    if (cx > len) cx = len;
+                }
+                ed_feedback = NULL;
+            } else if (c == 127 || c == 8) {
+                if (bar.used) bar.command[--bar.used] = '\0';
+            } else if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
+                if (bar.used < sizeof bar.command - 1) {
+                    bar.command[bar.used++] = c;
+                    bar.command[bar.used] = '\0';
+                }
+            }
             continue;
         }
 
         if (c == 27) {
             char seq[2];
-            n = ed_read(0, &seq[0], 1);
-            if (n == -1) { perror("read"); rc = 1; break; }
-            if (n != 1) break;
-            n = ed_read(0, &seq[1], 1);
-            if (n == -1) { perror("read"); rc = 1; break; }
-            if (n != 1) break;
+            int sequence = ed_escape_sequence(seq, &pending);
+            if (sequence == -1) { rc = 1; break; }
+            if (!sequence) {
+                bar.focused = 0;
+                bar.used = 0; bar.command[0] = '\0';
+                continue;
+            }
+            if (bar.focused) continue;
             if (seq[0] != '[') continue;
             if (seq[1] == 'A' && cy > 0) cy--;
             else if (seq[1] == 'B' && cy < d.count - 1) cy++;
@@ -612,7 +785,7 @@ static int ed_visual(const char *path)
             size_t ll = strlen(cur);
             if (cx > 0) {
                 char *nb = malloc(ll);
-                if (!nb) { perror("malloc"); rc = 1; break; }
+                if (!nb) { ed_error("malloc"); rc = 1; break; }
                 memcpy(nb, cur, (size_t)cx - 1);
                 memcpy(nb + cx - 1, cur + cx, ll - (size_t)cx);
                 int ok = line_set(&d, cy, nb, ll - 1);
@@ -622,7 +795,7 @@ static int ed_visual(const char *path)
             } else if (cy > 0) {
                 size_t pl = strlen(d.line[cy - 1]);
                 char *nb = malloc(pl + ll + 1);
-                if (!nb) { perror("malloc"); rc = 1; break; }
+                if (!nb) { ed_error("malloc"); rc = 1; break; }
                 memcpy(nb, d.line[cy - 1], pl);
                 memcpy(nb + pl, cur, ll);
                 int ok = line_set(&d, cy - 1, nb, pl + ll);
@@ -640,7 +813,7 @@ static int ed_visual(const char *path)
             size_t ll = strlen(cur);
             if ((size_t)cx > ll) cx = (int)ll;
             char *nb = malloc(ll + 2);
-            if (!nb) { perror("malloc"); rc = 1; break; }
+            if (!nb) { ed_error("malloc"); rc = 1; break; }
             memcpy(nb, cur, (size_t)cx);
             nb[cx] = c;
             memcpy(nb + cx + 1, cur + cx, ll - (size_t)cx);
@@ -660,23 +833,78 @@ static int ed_visual(const char *path)
 static int ed_open(const char *path)
 {
     if (!path || !*path) {
-        printf("  usage: o <file>\n");
+        ed_report("  usage: o <file>\n");
         return 1;
     }
 
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd == -1) {
-        perror("open");
+        ed_error("open");
         return 1;
     }
 
     if (ed_close() == -1) {
-        if (close(fd) == -1) perror("close");
+        if (close(fd) == -1) ed_error("close");
         return 1;
     }
     ed_fd = fd;
-    printf("  %s%s%s  fd %d\n", C_BRAND, path, C_OFF, fd);
+    ed_report("  opened %s\n", path);
     return 0;
+}
+
+static char *ed_parse_command(char *line, char **arg)
+{
+    char *nl = strchr(line, '\n');
+    if (nl) *nl = '\0';
+    while (*line == ' ' || *line == '\t') line++;
+    *arg = line;
+    while (**arg && **arg != ' ' && **arg != '\t') (*arg)++;
+    if (**arg) {
+        *(*arg)++ = '\0';
+        while (**arg == ' ' || **arg == '\t') (*arg)++;
+    }
+    return line;
+}
+
+static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *refresh)
+{
+    char *arg, *name = ed_parse_command(line, &arg);
+    *refresh = 0;
+    if (!*name) return 0;
+    if (strcmp(name, "help") == 0 || strcmp(name, "?") == 0) { ed_help(); return 0; }
+    int kind = -1;
+    for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++)
+        if (strcmp(name, ed_commands[i].name) == 0) kind = ed_commands[i].kind;
+    if (kind == ED_CLOSE) return ED_QUIT;
+    if (kind == -1 && strcmp(name, "v") != 0) {
+        ed_report("  unknown command: %s; use help\n", name);
+        return 1;
+    }
+    if (dirty && kind != -1) {
+        ed_report("save with ^O before file commands\n");
+        return 1;
+    }
+    if (kind == ED_OPEN) {
+        if (strlen(arg) >= path_size) { ed_report("file path too long\n"); return 1; }
+        int rc = ed_open(arg);
+        if (!rc) { snprintf(path, path_size, "%s", arg); *refresh = 2; }
+        return rc;
+    }
+    if (ed_fd == -1) { ed_report("  no file open; use o <file>\n"); return 1; }
+    if (kind == -1) return ED_VIEW;
+    int rc;
+    switch (kind) {
+        case ED_PRINT: rc = ed_print(arg); break;
+        case ED_APPEND: rc = ed_append(arg); break;
+        case ED_DELETE: rc = ed_delete(arg); break;
+        case ED_INSERT: rc = ed_insert(arg); break;
+        default: rc = ed_search(arg); break;
+    }
+    if (!rc && (kind == ED_APPEND || kind == ED_DELETE || kind == ED_INSERT)) {
+        *refresh = 1;
+        ed_report("saved changes\n");
+    }
+    return rc;
 }
 
 int cmd_edit(int argc, char **argv)
@@ -686,14 +914,13 @@ int cmd_edit(int argc, char **argv)
     int status = 0;
 
     if (argc >= 2) {
+        if (strlen(argv[1]) >= sizeof path) { ed_report("file path too long\n"); return 1; }
         if (ed_open(argv[1]) != 0) return 1;
         snprintf(path, sizeof path, "%s", argv[1]);
-        status = ed_visual(path);
-        if (status != ED_COMMANDS) {
-            if (ed_close() == -1) status = 1;
-            return status;
-        }
-        status = 0;
+        status = ed_visual(path, sizeof path);
+        if (status == ED_QUIT) status = 0;
+        if (ed_close() == -1) status = 1;
+        return status;
     }
 
     ed_help();
@@ -707,55 +934,16 @@ int cmd_edit(int argc, char **argv)
                 printf("\n");
                 continue;
             }
-            if (ferror(stdin)) { perror("fgets"); status = 1; }
+            if (ferror(stdin)) { ed_error("fgets"); status = 1; }
             break;
         }
 
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-
-        char *cmd = line;
-        while (*cmd == ' ' || *cmd == '\t') cmd++;
-        if (!*cmd) continue;
-
-        char *arg = cmd;
-        while (*arg && *arg != ' ' && *arg != '\t') arg++;
-        if (*arg) {
-            *arg++ = '\0';
-            while (*arg == ' ' || *arg == '\t') arg++;
-        }
-
-        if (strcmp(cmd, "q") == 0) break;
-        if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
-            ed_help();
-            status = 0;
-            continue;
-        }
-        if (strcmp(cmd, "o") == 0) {
-            status = ed_open(arg);
-            if (status == 0) snprintf(path, sizeof path, "%s", arg);
-            continue;
-        }
-
-        if (ed_fd == -1) {
-            printf("  %sno file open%s  use: o <file>\n", C_WARN, C_OFF);
-            status = 1;
-            continue;
-        }
-
-        if (strcmp(cmd, "v") == 0) {
-            status = ed_visual(path);
-            if (status == ED_COMMANDS) { status = 0; ed_help(); }
-        }
-        else if (strcmp(cmd, "p") == 0) status = ed_print(arg);
-        else if (strcmp(cmd, "a") == 0) status = ed_append(arg);
-        else if (strcmp(cmd, "d") == 0) status = ed_delete(arg);
-        else if (strcmp(cmd, "i") == 0) status = ed_insert(arg);
-        else if (strcmp(cmd, "s") == 0) status = ed_search(arg);
-        else {
-            printf("  %s'%s' is not a command.%s Try %sa %s%s, or %sv%s for the full-screen editor.\n",
-                   C_WARN, cmd, C_OFF, C_BRAND, cmd, C_OFF, C_BRAND, C_OFF);
-            status = 1;
+        int refresh;
+        status = ed_execute(line, path, sizeof path, 0, &refresh);
+        if (status == ED_QUIT) { status = 0; break; }
+        if (status == ED_VIEW) {
+            status = ed_visual(path, sizeof path);
+            if (status == ED_QUIT) { status = 0; break; }
         }
     }
 
