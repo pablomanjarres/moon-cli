@@ -257,6 +257,28 @@ def cancel_command(folder):
         check_view(text, file, ("Zalpha", "beta"))
         assert file.read_bytes() == b"alpha\nbeta\n", "ESC saved visual edits"
         session.visual("\x0c")
+        session.visual("\x0f")
+        session.command("q", exits=True)
+        session.restored()
+    finally:
+        session.close()
+
+
+def dirty_quit(folder):
+    file = folder / "dirty-quit.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("X")
+        session.visual("\x0c")
+        text = session.command("q")
+        check_view(text, file, ("Xalpha", "beta"))
+        session.raw()
+        assert re.search(r"save.*\^O|\^O.*save", text, re.I), "dirty q omitted save hint"
+        assert file.read_bytes() == b"alpha\nbeta\n", "dirty q changed disk"
+        session.visual("\x0f")
+        assert file.read_bytes() == b"Xalpha\nbeta\n"
         session.command("q", exits=True)
         session.restored()
     finally:
@@ -291,6 +313,7 @@ if __name__ == "__main__":
         folder = Path(directory)
         legacy_long_match(folder)
         cancel_command(folder)
+        dirty_quit(folder)
         for width in (80, 50):
             commands_from_visual(folder, width)
         dirty_and_return(folder)
