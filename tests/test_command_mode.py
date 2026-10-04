@@ -331,6 +331,27 @@ def queued_escape(folder):
         session.close()
 
 
+def literal_after_escape(folder, literal):
+    file = folder / "literal.txt"
+    file.write_bytes(b"alpha\nbeta\n")
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("\x0c")
+        session.visual("a")
+        session.visual("\x1b")
+        for key in literal:
+            session.visual(key)
+        frame = session.send("\x0f", r"saved file[\s\S]*\x1b\[\?25h$", raw=True)
+        wanted = (literal + "alpha\nbeta\n").encode()
+        assert file.read_bytes() == wanted, "Escape consumed literal text: " + repr(file.read_bytes())
+        check_view(check_layout(frame, 80), file, (literal + "alpha", "beta"))
+        session.send("\x18", SHELL)
+        session.restored()
+    finally:
+        session.close()
+
+
 def narrow_and_long_line(folder):
     file = folder / "long.txt"
     file.write_bytes(b"x" * 160 + b"\n")
@@ -361,6 +382,8 @@ if __name__ == "__main__":
         cancel_command(folder)
         dirty_quit(folder)
         queued_escape(folder)
+        for literal in ("[text]", "[123text]"):
+            literal_after_escape(folder, literal)
         for prefix, direction in ((0.06, 0), (0.2, 0), (0, 0.06), (0, 0.2), (0.2, 0.2), (0.35, 0)):
             delayed_arrow(folder, prefix, direction)
         for width in (80, 50):
