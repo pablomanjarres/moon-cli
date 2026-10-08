@@ -314,3 +314,130 @@ invalid:
     return NULL;
 }
 
+static void *codec_worker(void *argument)
+{
+    HuffmanJob *job = argument;
+    for (;;) {
+        uint64_t offset = 0;
+        uint32_t bits = 0;
+        pthread_mutex_lock(&job->mutex);
+        while (!stopped_locked(job) && job->next < job->chunks &&
+               job->next - job->written >= job->window)
+            pthread_cond_wait(&job->changed, &job->mutex);
+        uint64_t index = job->next;
+        if (stopped_locked(job) || index == job->chunks) {
+            pthread_mutex_unlock(&job->mutex); break;
+        }
+        if (job->decompress && read_chunk_locked(job, index, &offset, &bits) < 0) {
+            fail_locked(job, errno);
+            pthread_mutex_unlock(&job->mutex); break;
+        }
+        ++job->next;
+        pthread_mutex_unlock(&job->mutex);
+        unsigned char *data = job->decompress ? decode_chunk(job, index, offset, bits)
+                                             : encode_chunk(job, index, &bits);
+        if (!data) { fail(job, errno); break; }
+        pthread_mutex_lock(&job->mutex);
+        job->slots[index % job->window] = (struct Slot){data, chunk_bytes(job, index), bits, 1};
+        pthread_cond_broadcast(&job->changed);
+        pthread_mutex_unlock(&job->mutex);
+    }
+    return NULL;
+}
+
+static unsigned start_workers(HuffmanJob *job, pthread_t *threads, void *(*worker)(void *))
+{
+    unsigned count = 0;
+    job->next = job->written = 0;
+    for (; count < job->workers; ++count) {
+        int error = pthread_create(&threads[count], NULL, worker, job);
+        if (error) { fail(job, error); break; }
+    }
+    return count;
+}
+
+static void join_workers(pthread_t *threads, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) pthread_join(threads[i], NULL);
+}
+
+static int archive_header(HuffmanJob *job, int output)
+{
+    unsigned char header[HEADER_SIZE];
+    if (job->decompress) {
+        if (job->source.st_size < HEADER_SIZE) { errno = EINVAL; return -1; }
+        if (read_at(job->snapshot, header, sizeof header, 0) < 0) return -1;
+        job->size = load_be(header + 8, 8);
+        job->chunks = load_be(header + 20, 8);
+        job->checksum = load_be(header + 28, 8);
+        if (memcmp(header, "MOONHF01", 8) || load_be(header + 16, 4) != CHUNK ||
+            job->size > (uint64_t)LLONG_MAX - (uint64_t)job->source.st_size ||
+            job->chunks != job->size / CHUNK + (job->size % CHUNK != 0) ||
+            job->chunks > ((uint64_t)job->source.st_size - HEADER_SIZE) / 9) {
+            errno = EINVAL; return -1;
+        }
+        uint64_t total = 0;
+        for (unsigned i = 0; i < 256; ++i) {
+            job->frequencies[i] = load_be(header + 36 + i * 8, 8);
+            if (job->frequencies[i] > job->size - total) { errno = EINVAL; return -1; }
+            total += job->frequencies[i];
+        }
+        if (total != job->size) { errno = EINVAL; return -1; }
+        job->cursor = HEADER_SIZE;
+        pthread_mutex_lock(&job->mutex);
+        job->status.total = (uint64_t)job->source.st_size + job->size;
+        notify_locked(job);
+        pthread_mutex_unlock(&job->mutex);
+        return 0;
+    }
+    memcpy(header, "MOONHF01", 8);
+    store_be(header + 8, job->size, 8);
+    store_be(header + 16, CHUNK, 4);
+    store_be(header + 20, job->chunks, 8);
+    store_be(header + 28, job->checksum, 8);
+    for (unsigned i = 0; i < 256; ++i) store_be(header + 36 + i * 8, job->frequencies[i], 8);
+    return write_all(output, header, sizeof header);
+}
+
+static int write_chunks(HuffmanJob *job, int output)
+{
+    pthread_t threads[MAX_WORKERS];
+    unsigned count = start_workers(job, threads, codec_worker);
+    uint64_t hash = HASH_INITIAL, frequencies[256] = {0};
+    while (job->written < job->chunks) {
+        pthread_mutex_lock(&job->mutex);
+        struct Slot *slot = &job->slots[job->written % job->window];
+        while (!slot->ready && !stopped_locked(job)) pthread_cond_wait(&job->changed, &job->mutex);
+        if (stopped_locked(job)) { pthread_mutex_unlock(&job->mutex); break; }
+        struct Slot chunk = *slot;
+        pthread_mutex_unlock(&job->mutex);
+        int error = 0;
+        if (job->decompress) {
+            if (write_all(output, chunk.data, chunk.bytes) < 0) error = errno;
+            hash = hash_bytes(hash, chunk.data, chunk.bytes);
+            for (uint32_t i = 0; i < chunk.bytes; ++i) ++frequencies[chunk.data[i]];
+        } else {
+            unsigned char header[8];
+            store_be(header, chunk.bytes, 4); store_be(header + 4, chunk.bits, 4);
+            if (write_all(output, header, sizeof header) < 0 ||
+                write_all(output, chunk.data, ((size_t)chunk.bits + 7) / 8) < 0) error = errno;
+        }
+        pthread_mutex_lock(&job->mutex);
+        free(chunk.data);
+        memset(slot, 0, sizeof *slot);
+        ++job->written;
+        job->status.completed += chunk.bytes;
+        if (error) fail_locked(job, error);
+        pthread_cond_broadcast(&job->changed);
+        notify_locked(job);
+        pthread_mutex_unlock(&job->mutex);
+    }
+    join_workers(threads, count);
+    if (stopped(job)) return -1;
+    if (job->decompress && (job->cursor != (uint64_t)job->source.st_size ||
+        hash != job->checksum || memcmp(frequencies, job->frequencies, sizeof frequencies))) {
+        errno = EINVAL; return -1;
+    }
+    return 0;
+}
+
