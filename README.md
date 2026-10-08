@@ -50,5 +50,7 @@ Every command traces the syscalls it makes:
 `color` has its own page: [docs/color.md](docs/color.md).
 The text editor's design and commands are in [docs/editor.md](docs/editor.md).
 The technical report is available as [docs/editor.pdf](docs/editor.pdf).
+The concurrent Huffman project is in [docs/huffman.md](docs/huffman.md),
+with its technical report in [docs/huffman.pdf](docs/huffman.pdf).
 
 MIT.
