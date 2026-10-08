@@ -3,12 +3,56 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
+
+static ssize_t held_write(int fd, const void *data, size_t bytes);
+#define write held_write
+#include "../huffman.c"
+#undef write
+
+static pthread_mutex_t write_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t write_changed = PTHREAD_COND_INITIALIZER;
+static size_t held_bytes;
+static int write_reached;
+
+static ssize_t held_write(int fd, const void *data, size_t bytes)
+{
+    pthread_mutex_lock(&write_mutex);
+    if (held_bytes && bytes == held_bytes) {
+        write_reached = 1;
+        pthread_cond_broadcast(&write_changed);
+        while (held_bytes) pthread_cond_wait(&write_changed, &write_mutex);
+    }
+    pthread_mutex_unlock(&write_mutex);
+    return write(fd, data, bytes);
+}
+
+static void hold_write(size_t bytes)
+{
+    pthread_mutex_lock(&write_mutex);
+    held_bytes = bytes;
+    write_reached = 0;
+    pthread_cond_broadcast(&write_changed);
+    pthread_mutex_unlock(&write_mutex);
+}
+
+static void wait_write(void)
+{
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 10;
+    pthread_mutex_lock(&write_mutex);
+    while (!write_reached)
+        assert(pthread_cond_timedwait(&write_changed, &write_mutex, &deadline) == 0);
+    pthread_mutex_unlock(&write_mutex);
+}
 
 static char directory[] = "/tmp/moon-huffman-test-XXXXXX";
 static unsigned serial;
@@ -148,9 +192,12 @@ static void snapshot_and_destination(void)
     assert(!run(archive, output, 1, 4).error);
     equal_files(expected, output);
     unlink(archive);
+    hold_write(HEADER_SIZE);
     job = huffman_start(fd, archive, 0, 4);
     assert(job);
+    wait_write();
     put(archive, &edited, 1);
+    hold_write(0);
     assert(wait_job(job).error == EEXIST);
     huffman_destroy(job);
     int existing = open(archive, O_RDONLY);
@@ -179,26 +226,27 @@ static void lifecycle(void)
     assert(!huffman_start(pipes[0], output, 0, 4) && errno == EINVAL);
     close(pipes[0]); close(pipes[1]);
     for (int i = 0; i < 20; ++i) {
+        hold_write(HEADER_SIZE);
         HuffmanJob *job = huffman_start(fd, output, 0, 4);
         assert(job);
         huffman_cancel(job);
+        hold_write(0);
         HuffmanStatus state = wait_job(job);
         assert(state.cancelled && !state.error);
         huffman_destroy(job);
         assert(access(output, F_OK) < 0 && errno == ENOENT);
     }
-    size_t large = 32 * 1024 * 1024;
+    size_t large = 16 * CHUNK;
     assert(ftruncate(fd, (off_t)large) == 0);
+    hold_write(CHUNK / 8);
     HuffmanJob *job = huffman_start(fd, output, 0, 4);
     assert(job);
-    struct pollfd event = {huffman_event_fd(job), POLLIN, 0};
-    HuffmanStatus state;
-    do {
-        state = huffman_status(job);
-        assert(!state.error && !state.done);
-        if (state.completed <= 2 * large) assert(poll(&event, 1, 10000) > 0);
-    } while (state.completed <= 2 * large);
+    wait_write();
+    HuffmanStatus state = huffman_status(job);
+    assert(state.snapshot_ready && state.completed == 2 * large);
+    assert(!state.error && !state.done);
     huffman_cancel(job);
+    hold_write(0);
     state = wait_job(job);
     assert(state.cancelled && !state.error);
     huffman_destroy(job);
