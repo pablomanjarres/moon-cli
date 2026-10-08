@@ -1,11 +1,13 @@
 """Exercise the real editor, rendered command help, and terminal restoration."""
 import errno
+from contextlib import contextmanager
 import fcntl
 import os
 from pathlib import Path
 import pty
 import re
 import select
+import shlex
 import signal
 import struct
 import subprocess
@@ -19,12 +21,14 @@ SHELL = r"moon [^\r\n]* ❯ $"
 
 
 class Session:
-    def __init__(self, width):
+    def __init__(self, width, executable="./moon", env=None):
         self.transcript = ""
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm"
-            os.execv("./moon", ["./moon"])
+            if env:
+                os.environ.update(env)
+            os.execv(str(executable), [str(executable)])
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", 24, width, 0, 0))
         try:
@@ -49,12 +53,15 @@ class Session:
             if not chunk:
                 break
             data += chunk
-            self.transcript = (self.transcript + chunk.decode("utf-8", "replace"))[-4 * 1024 * 1024:]
+            self.record(chunk)
             assert len(data) <= 1024 * 1024, "terminal output exceeded test limit"
             text = data.decode("utf-8", "replace")
             if re.search(pattern, text if raw else ANSI.sub("", text)):
                 return text
         raise AssertionError(f"did not see {pattern!r}: {data[-1000:]!r}")
+
+    def record(self, chunk):
+        self.transcript = (self.transcript + chunk.decode("utf-8", "replace"))[-4 * 1024 * 1024:]
 
     def notice(self, pattern, timeout=30):
         if not re.search(pattern, ANSI.sub("", self.transcript), re.I):
@@ -95,6 +102,98 @@ class Session:
             pass
         os.waitpid(self.pid, 0)
         os.close(self.fd)
+
+
+@contextmanager
+def gated_editor(folder):
+    with tempfile.TemporaryDirectory(prefix="gate-", dir=folder) as directory:
+        directory = Path(directory)
+        wrapper = directory / "gated_huffman.c"
+        wrapper.write_text(r'''
+#include <pthread.h>
+#include <poll.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+static ssize_t gated_write(int, const void *, size_t);
+static int gated_join(pthread_t, void **);
+#define write gated_write
+#define pthread_join gated_join
+#include "huffman.c"
+#undef write
+#undef pthread_join
+static pthread_mutex_t gate_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t gate_thread;
+static int gate_blocked;
+
+static ssize_t gated_write(int fd, const void *data, size_t bytes)
+{
+    struct stat info;
+    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink &&
+        lseek(fd, 0, SEEK_CUR) == 0) {
+        int ready = atoi(getenv("MOON_TEST_READY"));
+        int release = atoi(getenv("MOON_TEST_RELEASE"));
+        pthread_mutex_lock(&gate_mutex);
+        gate_thread = pthread_self();
+        gate_blocked = 1;
+        pthread_mutex_unlock(&gate_mutex);
+        struct pollfd input = {release, POLLIN, 0};
+        char token;
+        int passed = write(ready, "W", 1) == 1 && poll(&input, 1, 10000) == 1 &&
+                     read(release, &token, 1) == 1;
+        pthread_mutex_lock(&gate_mutex);
+        gate_blocked = 0;
+        pthread_mutex_unlock(&gate_mutex);
+        if (!passed) { errno = ETIMEDOUT; return -1; }
+    }
+    return write(fd, data, bytes);
+}
+
+static int gated_join(pthread_t thread, void **result)
+{
+    pthread_mutex_lock(&gate_mutex);
+    int blocked = gate_blocked && !pthread_equal(pthread_self(), gate_thread);
+    pthread_mutex_unlock(&gate_mutex);
+    if (blocked) write(atoi(getenv("MOON_TEST_READY")), "J", 1);
+    return pthread_join(thread, result);
+}
+''')
+        executable = directory / "moon"
+        sources = [str(path) for path in sorted(Path.cwd().glob("*.c"))
+                   if path.name != "huffman.c" and not path.name.startswith(".")]
+        subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-Wall", "-Wextra",
+                        "-std=gnu99", "-D_GNU_SOURCE", "-pthread", "-I.", *sources,
+                        str(wrapper), "-o", str(executable)], check=True, timeout=30)
+        ready, child_ready = os.pipe()
+        child_release, release = os.pipe()
+        descriptors = [ready, child_ready, child_release, release]
+        session = None
+        try:
+            os.set_inheritable(child_ready, True)
+            os.set_inheritable(child_release, True)
+            session = Session(80, executable, {"MOON_TEST_READY": str(child_ready),
+                                               "MOON_TEST_RELEASE": str(child_release)})
+            for fd in (child_ready, child_release):
+                os.close(fd)
+                descriptors.remove(fd)
+            yield session, ready, release
+        finally:
+            if session is not None:
+                session.close()
+            for fd in descriptors:
+                os.close(fd)
+
+
+def gate_event(session, fd, token):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        readable = select.select([fd, session.fd], [], [], max(0, deadline - time.monotonic()))[0]
+        if fd in readable:
+            assert os.read(fd, 1) == token, "unexpected background gate event"
+            return
+        if session.fd in readable:
+            session.record(os.read(session.fd, 65536))
+    raise AssertionError("background gate timed out")
 
 
 def check_layout(frame, width):
@@ -446,16 +545,15 @@ def huffman_background(folder):
     archive = folder / "background.mhf"
     output = folder / "background.out"
     line = bytes(33 + ((n * 37 + n // 7) % 94) for n in range(4095)) + b"\n"
-    original = line * 16384
+    original = line * 128
     file.write_bytes(original)
-    session = Session(80)
-    try:
+    with gated_editor(folder) as (session, ready, release):
         session.visual(f"edit {file}\n")
         session.visual("\x0c")
         session.transcript = ""
         session.command(f"c {archive}")
+        gate_event(session, ready, b"W")
         session.notice(r"compressing [1-9][0-9]*%")
-        assert "compression complete" not in session.transcript.lower(), "fixture finished before concurrent editing"
         text = session.command("status")
         assert re.search(r"compressing \d+%", text, re.I), "status omitted job progress"
         text = session.command(f"c {folder / 'busy.mhf'}")
@@ -467,16 +565,17 @@ def huffman_background(folder):
         assert "compression complete" not in session.transcript.lower(), "editing did not run during compression"
         session.send("\x0f", r"saved file[\s\S]*\x1b\[\?25h", raw=True)
         assert file.read_bytes() == b"Z" + original, "background compression blocked saving"
+        os.write(release, b"1")
         session.notice(r"compression complete")
         session.send("\x0c", r"Command: [^\r\n]*\x1b\[\?25h", raw=True)
         session.transcript = ""
         session.command(f"u {archive} {output}")
+        gate_event(session, ready, b"W")
+        os.write(release, b"1")
         session.notice(r"decompression complete")
         assert output.read_bytes() == original, "compression did not preserve its original snapshot"
         session.command("q", exits=True)
         session.restored()
-    finally:
-        session.close()
 
 
 def huffman_cleanup(folder):
@@ -485,8 +584,7 @@ def huffman_cleanup(folder):
     output = folder / "cancelled.out"
     malformed = folder / "malformed.mhf"
     malformed.write_bytes(b"not a Huffman archive")
-    session = Session(80)
-    try:
+    with gated_editor(folder) as (session, ready, release):
         session.send("edit\n")
         session.send(f"o {file}\n")
         before = set(folder.iterdir())
@@ -499,23 +597,35 @@ def huffman_cleanup(folder):
         assert set(folder.iterdir()) == before, "malformed archive left output or temporary files"
         session.transcript = ""
         session.send(f"c {archive}\n")
+        gate_event(session, ready, b"W")
         session.send("cancel\n")
+        os.write(release, b"1")
         session.notice(r"compression cancelled")
         assert not archive.exists(), "cancel published a partial archive"
         assert set(folder.iterdir()) == before, "cancel left temporary files"
         session.transcript = ""
         session.send(f"u {folder / 'background.mhf'} {output}\n")
+        gate_event(session, ready, b"W")
         session.send("cancel\n")
+        os.write(release, b"1")
         session.notice(r"decompression cancelled")
         assert set(folder.iterdir()) == before, "decompression cancel left output or temporary files"
         session.transcript = ""
         session.send(f"c {archive}\n")
-        session.send("q\n", SHELL)
+        gate_event(session, ready, b"W")
+        os.write(session.fd, b"q\n")
+        gate_event(session, ready, b"J")
+        os.write(release, b"1")
+        session.expect(SHELL)
         session.restored()
         session.visual(f"edit {file}\n")
         session.visual("\x0c")
         session.command(f"c {archive}")
-        session.send("\x18", SHELL)
+        gate_event(session, ready, b"W")
+        os.write(session.fd, b"\x18")
+        gate_event(session, ready, b"J")
+        os.write(release, b"1")
+        session.expect(SHELL)
         session.restored()
         assert set(folder.iterdir()) == before, "fullscreen exit left output or temporary files"
         assert set(folder.iterdir()) == before, "quit left background output or temporary files"
@@ -523,8 +633,6 @@ def huffman_cleanup(folder):
         session.send("status\n")
         session.send("q\n", SHELL)
         session.restored()
-    finally:
-        session.close()
 
 
 if __name__ == "__main__":
