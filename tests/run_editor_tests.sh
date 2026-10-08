@@ -108,8 +108,12 @@ vis '\x1b[B|zzz'
 check "visual without ^O leaves the file untouched" 'alpha\nbeta\n'
 
 ${CC:-cc} -Wall -Wextra -std=gnu99 -D_GNU_SOURCE \
-    tests/editor_error_cases.c ui.c -o "$T"
+    tests/editor_error_cases.c parser.c ui.c huffman.c -pthread -o "$T"
 "$T" 2>/dev/null
+
+${CC:-cc} -Wall -Wextra -std=gnu99 -D_GNU_SOURCE -I. \
+    tests/huffman_tests.c -pthread -o "$T"
+"$T"
 
 python3 tests/test_command_mode.py
 

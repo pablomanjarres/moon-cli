@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "huffman.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -10,6 +11,9 @@
 #include <poll.h>
 
 static int ed_fd = -1;
+static HuffmanJob *ed_job;
+static int ed_job_decompress, ed_snapshot_ready;
+static char ed_job_notice[160];
 
 typedef struct {
     char text[4096];
@@ -31,7 +35,8 @@ static void ed_report(const char *format, ...);
 static void ed_error(const char *name);
 
 enum { ED_VIEW = 2, ED_QUIT };
-enum { ED_OPEN, ED_PRINT, ED_APPEND, ED_DELETE, ED_INSERT, ED_SEARCH, ED_CLOSE };
+enum { ED_OPEN, ED_PRINT, ED_APPEND, ED_DELETE, ED_INSERT, ED_SEARCH, ED_CLOSE,
+       ED_COMPRESS, ED_DECOMPRESS };
 
 static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *refresh);
 
@@ -46,16 +51,19 @@ static const struct {
     {"i", "n text", "insert a line at n", ED_INSERT},
     {"s", "word",   "find matching lines", ED_SEARCH},
     {"q", "",       "close the file and return to moon", ED_CLOSE},
+    {"c", "out",    "compress the saved file in the background", ED_COMPRESS},
+    {"u", "in out", "decompress to a new file in the background", ED_DECOMPRESS},
 };
 
 static void ed_commands_text(char *buf, size_t len, int compact)
 {
     size_t off = 0;
     for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++) {
+        int args = !compact || (compact == 2 && ed_commands[i].kind < ED_COMPRESS);
         int n = snprintf(buf + off, len - off, "%s%s%s%s",
                          i ? (compact ? " " : "  ") : "", ed_commands[i].name,
-                         !compact && *ed_commands[i].args ? " " : "",
-                         compact ? "" : ed_commands[i].args);
+                         args && *ed_commands[i].args ? " " : "",
+                         args ? ed_commands[i].args : "");
         if (n < 0 || (size_t)n >= len - off) break;
         off += (size_t)n;
     }
@@ -68,7 +76,87 @@ static void ed_help(void)
         ed_report("  %s %-6s  %s\n", ed_commands[i].name, ed_commands[i].args,
                ed_commands[i].description);
     ed_report("  v         full-screen view (^O save, ^L commands, ^X return)\n"
+           "  status    show background job progress\n"
+           "  cancel    cancel the background job\n"
            "  help / ?  show these commands\n");
+}
+
+static int ed_job_update(void)
+{
+    if (!ed_job) return 0;
+    HuffmanStatus status = huffman_status(ed_job);
+    char notice[sizeof ed_job_notice];
+    const char *action = ed_job_decompress ? "decompression" : "compression";
+    ed_snapshot_ready = status.snapshot_ready;
+    if (status.done) {
+        if (status.cancelled) snprintf(notice, sizeof notice, "%s cancelled", action);
+        else if (status.error) snprintf(notice, sizeof notice, "%s: %s", action,
+                                        strerror(status.error));
+        else snprintf(notice, sizeof notice, "%s complete", action);
+        huffman_destroy(ed_job);
+        ed_job = NULL;
+    } else {
+        unsigned percent = status.total ? (unsigned)(100.0L * status.completed / status.total) : 0;
+        snprintf(notice, sizeof notice, "%s %u%%", !ed_snapshot_ready ? "capturing snapshot" :
+                 ed_job_decompress ? "decompressing" : "compressing",
+                 percent > 99 ? 99 : percent);
+    }
+    int changed = strcmp(notice, ed_job_notice) != 0;
+    snprintf(ed_job_notice, sizeof ed_job_notice, "%s", notice);
+    return changed;
+}
+
+static int ed_wait_input(void)
+{
+    struct pollfd fds[2] = {{0, POLLIN, 0}, {-1, POLLIN, 0}};
+    if (ed_job) fds[1].fd = huffman_event_fd(ed_job);
+    int ready;
+    do { ready = poll(fds, ed_job ? 2 : 1, -1); } while (ready == -1 && errno == EINTR);
+    if (ready == -1) { ed_error("poll"); return -1; }
+    if (fds[1].revents) ed_job_update();
+    return fds[0].revents ? 1 : 0;
+}
+
+static int ed_snapshot_busy(void)
+{
+    ed_job_update();
+    if (!ed_job || ed_snapshot_ready) return 0;
+    ed_report("snapshot in progress; retry file command or save\n");
+    return 1;
+}
+
+static int ed_start_job(char *arg, int decompress)
+{
+    ed_job_update();
+    if (ed_job) { ed_report("a background job is already running\n"); return 1; }
+    char *args[4];
+    int count = parse_line(arg, args, 4);
+    if (count != (decompress ? 2 : 1)) {
+        ed_report("usage: %s\n", decompress ? "u <input> <output>" : "c <output>");
+        return 1;
+    }
+    int input = decompress ? open(args[0], O_RDONLY) : ed_fd;
+    if (input == -1) { ed_error("open"); return 1; }
+    ed_job = huffman_start(input, args[decompress ? 1 : 0], decompress, 4);
+    int saved = errno;
+    if (decompress) close(input);
+    if (!ed_job) { errno = saved; ed_error("huffman"); return 1; }
+    ed_job_decompress = decompress;
+    ed_snapshot_ready = 0;
+    snprintf(ed_job_notice, sizeof ed_job_notice, "%s 0%%",
+             decompress ? "decompressing" : "compressing");
+    ed_report("%s\n", ed_job_notice);
+    return 0;
+}
+
+static void ed_stop_job(void)
+{
+    if (ed_job) {
+        huffman_cancel(ed_job);
+        huffman_destroy(ed_job);
+        ed_job = NULL;
+    }
+    ed_job_notice[0] = '\0';
 }
 
 static ssize_t ed_read(int fd, void *buf, size_t len)
@@ -659,10 +747,12 @@ static int ed_draw(Doc *d, const char *path, int cy, int cx, int rowoff,
     }
     if (rows > 2) {
         ed_commands_text(tmp, sizeof tmp, 0);
+        if (strlen(tmp) > (size_t)cols) ed_commands_text(tmp, sizeof tmp, 2);
         if (strlen(tmp) > (size_t)cols) ed_commands_text(tmp, sizeof tmp, 1);
         sc_row(&s, tmp, cols, 1, 1);
     }
     if (notice) snprintf(tmp, sizeof tmp, "%s", notice);
+    else if (*ed_job_notice) snprintf(tmp, sizeof tmp, "%s  ^L commands  ^O save", ed_job_notice);
     else snprintf(tmp, sizeof tmp, "^L commands  ^O save  ^X %s  %d/%d %s",
                   dirty ? "discard" : "exit", cy + 1, d->count, dirty ? "modified" : "saved");
     if (rows > 1) sc_row(&s, tmp, cols, 1, 1);
@@ -751,7 +841,12 @@ static int ed_visual(char *path, size_t path_size)
             c = (char)escape.replay[escape.next++]; n = 1;
             if (escape.next == escape.used) escape.used = escape.next = 0;
         } else if (pending != -1) { c = (char)pending; pending = -1; n = 1; }
-        else n = ed_read(0, &c, 1);
+        else {
+            int ready = ed_wait_input();
+            if (ready == -1) { rc = 1; break; }
+            if (!ready) continue;
+            n = ed_read(0, &c, 1);
+        }
         if (n == -1) { ed_error("read"); rc = 1; break; }
         if (n == 0) break;
 
@@ -791,7 +886,8 @@ static int ed_visual(char *path, size_t path_size)
         if (c == 15) {
             bar.feedback = (EdFeedback){0};
             ed_feedback = &bar.feedback;
-            if (doc_store(&d) == -1) rc = 1;
+            if (ed_snapshot_busy()) rc = 1;
+            else if (doc_store(&d) == -1) rc = 1;
             else { dirty = 0; rc = 0; ed_report("saved file\n"); }
             ed_feedback = NULL;
             continue;
@@ -929,6 +1025,17 @@ static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *
     *refresh = 0;
     if (!*name) return 0;
     if (strcmp(name, "help") == 0 || strcmp(name, "?") == 0) { ed_help(); return 0; }
+    if (strcmp(name, "status") == 0) {
+        ed_job_update();
+        ed_report("%s\n", *ed_job_notice ? ed_job_notice : "no background job");
+        return 0;
+    }
+    if (strcmp(name, "cancel") == 0) {
+        ed_job_update();
+        if (ed_job) { huffman_cancel(ed_job); ed_report("cancellation requested\n"); }
+        else ed_report("no background job\n");
+        return 0;
+    }
     int kind = -1;
     for (size_t i = 0; i < sizeof ed_commands / sizeof *ed_commands; i++)
         if (strcmp(name, ed_commands[i].name) == 0) kind = ed_commands[i].kind;
@@ -936,11 +1043,12 @@ static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *
         ed_report("  unknown command: %s; use help\n", name);
         return 1;
     }
-    if (dirty && kind != -1) {
+    if (dirty && kind != -1 && kind != ED_DECOMPRESS) {
         ed_report("save with ^O before file commands\n");
         return 1;
     }
     if (kind == ED_CLOSE) return ED_QUIT;
+    if (kind == ED_DECOMPRESS) return ed_start_job(arg, 1);
     if (kind == ED_OPEN) {
         if (strlen(arg) >= path_size) { ed_report("file path too long\n"); return 1; }
         int rc = ed_open(arg);
@@ -948,7 +1056,9 @@ static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *
         return rc;
     }
     if (ed_fd == -1) { ed_report("  no file open; use o <file>\n"); return 1; }
+    if (kind == ED_COMPRESS) return ed_start_job(arg, 0);
     if (kind == -1) return ED_VIEW;
+    if ((kind == ED_APPEND || kind == ED_DELETE || kind == ED_INSERT) && ed_snapshot_busy()) return 1;
     int rc;
     switch (kind) {
         case ED_PRINT: rc = ed_print(arg); break;
@@ -964,6 +1074,34 @@ static int ed_execute(char *line, char *path, size_t path_size, int dirty, int *
     return rc;
 }
 
+static int ed_read_line(char *line, size_t size)
+{
+    size_t used = 0;
+    int clipped = 0;
+    for (;;) {
+        char before[sizeof ed_job_notice];
+        snprintf(before, sizeof before, "%s", ed_job_notice);
+        int ready = ed_wait_input();
+        if (ready == -1) return -1;
+        if (strcmp(before, ed_job_notice) != 0) {
+            ed_report("\n%s\n  %sed%s %s ", ed_job_notice, C_BRAND, C_OFF, ICON_PROMPT);
+            fflush(stdout);
+        }
+        if (!ready) continue;
+        char c;
+        ssize_t n = ed_read(0, &c, 1);
+        if (n == -1) { ed_error("read"); return -1; }
+        if (!n) { line[used] = '\0'; return used ? 1 : 0; }
+        if (c == '\n') {
+            line[used] = '\0';
+            if (clipped) { ed_report("command too long\n"); used = 0; clipped = 0; continue; }
+            return 1;
+        }
+        if (used < size - 1) line[used++] = c;
+        else clipped = 1;
+    }
+}
+
 int cmd_edit(int argc, char **argv)
 {
     char line[2048];
@@ -976,6 +1114,7 @@ int cmd_edit(int argc, char **argv)
         snprintf(path, sizeof path, "%s", argv[1]);
         status = ed_visual(path, sizeof path);
         if (status == ED_QUIT) status = 0;
+        ed_stop_job();
         if (ed_close() == -1) status = 1;
         return status;
     }
@@ -985,15 +1124,8 @@ int cmd_edit(int argc, char **argv)
         printf("  %sed%s %s ", C_BRAND, C_OFF, ICON_PROMPT);
         fflush(stdout);
 
-        if (!fgets(line, sizeof line, stdin)) {
-            if (ferror(stdin) && errno == EINTR) {
-                clearerr(stdin);
-                printf("\n");
-                continue;
-            }
-            if (ferror(stdin)) { ed_error("fgets"); status = 1; }
-            break;
-        }
+        int read_status = ed_read_line(line, sizeof line);
+        if (read_status <= 0) { if (read_status == -1) status = 1; break; }
 
         int refresh;
         status = ed_execute(line, path, sizeof path, 0, &refresh);
@@ -1004,6 +1136,7 @@ int cmd_edit(int argc, char **argv)
         }
     }
 
+    ed_stop_job();
     if (ed_close() == -1) status = 1;
     return status;
 }

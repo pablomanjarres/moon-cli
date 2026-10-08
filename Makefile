@@ -10,7 +10,7 @@
 # ======================================================================================
 
 CC      = gcc
-CFLAGS  = -Wall -Wextra -std=gnu99 -g -D_GNU_SOURCE
+CFLAGS  = -Wall -Wextra -std=gnu99 -g -D_GNU_SOURCE -pthread
 TARGET  = moon
 
 SRCS    = $(wildcard *.c)

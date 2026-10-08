@@ -117,6 +117,8 @@ int main(int argc, char **argv)
     char *args[MAX_ARGS];
     int last_status = 0;
 
+    setvbuf(stdin, NULL, _IONBF, 0);
+
     ui_init();                          /* does this terminal do colors?  */
     if (handle_cli_flags(argc, argv))   /* ./moon --help | --version      */
         return 0;
