@@ -20,6 +20,7 @@ SHELL = r"moon [^\r\n]* ❯ $"
 
 class Session:
     def __init__(self, width):
+        self.transcript = ""
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm"
@@ -33,9 +34,9 @@ class Session:
             self.close()
             raise
 
-    def expect(self, pattern, raw=False):
+    def expect(self, pattern, raw=False, timeout=3):
         data = b""
-        end = time.monotonic() + 3
+        end = time.monotonic() + timeout
         while time.monotonic() < end:
             if not select.select([self.fd], [], [], 0.05)[0]:
                 continue
@@ -48,11 +49,17 @@ class Session:
             if not chunk:
                 break
             data += chunk
+            self.transcript = (self.transcript + chunk.decode("utf-8", "replace"))[-4 * 1024 * 1024:]
             assert len(data) <= 1024 * 1024, "terminal output exceeded test limit"
             text = data.decode("utf-8", "replace")
             if re.search(pattern, text if raw else ANSI.sub("", text)):
                 return text
         raise AssertionError(f"did not see {pattern!r}: {data[-1000:]!r}")
+
+    def notice(self, pattern, timeout=30):
+        if not re.search(pattern, ANSI.sub("", self.transcript), re.I):
+            self.expect("(?i)" + pattern, timeout=timeout)
+        return ANSI.sub("", self.transcript)
 
     def send(self, text, pattern=PROMPT, raw=False):
         os.write(self.fd, text.encode())
@@ -66,11 +73,13 @@ class Session:
         typed = ""
         for key in text:
             typed = typed[:-1] if key == "\x7f" else typed + key
-            frame = check_layout(self.visual(key), width)
-            assert typed[-min(16, width // 2):] in frame, "typed command is hidden"
+            tail = typed[-min(16, width // 2):]
+            pattern = r"Command: [^\r\n]*" + re.escape(tail) + r"[^\r\n]*[\s\S]*\x1b\[\?25h"
+            frame = check_layout(self.send(key, pattern, raw=True), width)
+            assert tail in frame, "typed command is hidden"
         if exits:
             return self.send("\r", SHELL)
-        return check_layout(self.visual("\r"), width)
+        return check_layout(self.send("\r", r"Command: \x1b[^\r\n]*[\s\S]*\x1b\[\?25h", raw=True), width)
 
     def raw(self):
         flags = termios.tcgetattr(self.fd)[3]
@@ -89,6 +98,8 @@ class Session:
 
 
 def check_layout(frame, width):
+    if "\x1b[?25h" in frame:
+        frame = frame[:frame.rfind("\x1b[?25h") + len("\x1b[?25h")]
     frame = frame.rsplit("\x1b[2J", 1)[-1]
     text = ANSI.sub("", frame)
     assert len(text.split("\r\n")) <= 24, "help renders below terminal bottom"
@@ -103,7 +114,8 @@ def check_help(frame, width):
     for syntax in (r"o <?file>?", r"p \[n\]", r"a <?text>?", r"d <?n>?",
                    r"i <?n>? <?text>?", r"s <?word>?"):
         assert re.search(r"\b" + syntax, text), f"help missing {syntax} at {width} columns"
-    assert re.search(r"\bq\b", text), "fullscreen help missing q"
+    for name in ("q", "c", "u"):
+        assert re.search(r"\b" + name + r"\b", text), f"help missing {name} at {width} columns"
     assert re.search(r"\^L\s+commands", text), "fullscreen help missing ^L shortcut"
 
 
@@ -177,7 +189,7 @@ def dirty_and_return(folder):
         assert "Xalpha" in text, "dirty document was discarded"
         session.raw()
         assert file.read_bytes() == b"alpha\nbeta\n", "unsaved content reached disk"
-        for command in ("a blocked", "d 1", "i 1 blocked", "o /nope/blocked.txt"):
+        for command in ("a blocked", "d 1", "i 1 blocked", "o /nope/blocked.txt", f"c {folder / 'dirty.mhf'}"):
             text = session.command(command)
             check_view(text, file, ("Xalpha", "beta"))
             assert re.search(r"save.*\^O|\^O.*save", text, re.I), "missing save-first hint"
@@ -204,10 +216,12 @@ def help_without_file():
         for command in ("edit\n", "help\n", "?\n"):
             text = ANSI.sub("", session.send(command))
             assert "editor commands:" in text, "line mode did not show help"
-            for name in ("o", "p", "a", "d", "i", "s", "q", "v"):
+            for name in ("o", "p", "a", "d", "i", "s", "q", "v", "c", "u", "status", "cancel"):
                 assert re.search(r"\n\s*" + name + r"\s", text), "help omitted " + name
             assert "no file open" not in text, "help requires an open file"
         assert "no file open" in ANSI.sub("", session.send("p\n"))
+        assert re.search(r"no (active|background) job", ANSI.sub("", session.send("status\n")))
+        assert re.search(r"no (active|background) job", ANSI.sub("", session.send("cancel\n")))
         session.send("q\n", SHELL)
         session.restored()
     finally:
@@ -377,9 +391,149 @@ def narrow_and_long_line(folder):
         session.close()
 
 
+def huffman_roundtrip(folder, fullscreen):
+    file = folder / "huffman input.txt"
+    archive = folder / "huffman archive.mhf"
+    output = folder / "huffman output.txt"
+    original = b"alpha\nbeta\nno-final-newline"
+    file.write_bytes(original)
+    for path in (archive, output):
+        path.unlink(missing_ok=True)
+    session = Session(80)
+    try:
+        if fullscreen:
+            session.visual(f'edit "{file}"\n')
+            session.visual("\x0c")
+            command = session.command
+        else:
+            session.send("edit\n")
+            session.send(f"o {file}\n")
+            command = lambda text: session.send(text + "\n")
+        session.transcript = ""
+        text = command(f'c "{archive}"')
+        assert re.search(r"compressing|compression complete", ANSI.sub("", text), re.I), "c did not start compression"
+        session.notice(r"compression complete")
+        assert archive.is_file() and archive.stat().st_size > 0, "compression produced no archive"
+        assert file.read_bytes() == original, "compression changed the source"
+        if not fullscreen:
+            session.send("q\n", SHELL)
+            session.restored()
+            session.send("edit\n")
+        session.transcript = ""
+        command(f'u "{archive}" "{output}"')
+        session.notice(r"decompression complete")
+        actual = output.read_bytes()
+        assert actual == original, f"Huffman round trip changed saved bytes: {actual!r}"
+        if not fullscreen:
+            command(f"o {file}")
+        for text, target in ((f'c "{archive}"', archive), (f'u "{archive}" "{output}"', output)):
+            contents = target.read_bytes()
+            session.transcript = ""
+            command(text)
+            session.notice(r"exists")
+            assert target.read_bytes() == contents, "Huffman overwrote an existing destination"
+        if fullscreen:
+            session.command("q", exits=True)
+        else:
+            session.send("q\n", SHELL)
+        session.restored()
+    finally:
+        session.close()
+
+
+def huffman_background(folder):
+    file = folder / "background.txt"
+    archive = folder / "background.mhf"
+    output = folder / "background.out"
+    line = bytes(33 + ((n * 37 + n // 7) % 94) for n in range(4095)) + b"\n"
+    original = line * 16384
+    file.write_bytes(original)
+    session = Session(80)
+    try:
+        session.visual(f"edit {file}\n")
+        session.visual("\x0c")
+        session.transcript = ""
+        session.command(f"c {archive}")
+        session.notice(r"compressing [1-9][0-9]*%")
+        assert "compression complete" not in session.transcript.lower(), "fixture finished before concurrent editing"
+        text = session.command("status")
+        assert re.search(r"compressing \d+%", text, re.I), "status omitted job progress"
+        text = session.command(f"c {folder / 'busy.mhf'}")
+        assert re.search(r"busy|already|in progress", text, re.I), "second job was accepted"
+        session.send("\x0c", r"Editing; \^L commands[\s\S]*\x1b\[\?25h", raw=True)
+        frame = session.send("Z", re.escape("Z" + line[:30].decode()) + r"[\s\S]*\x1b\[\?25h", raw=True)
+        check_layout(frame, 80)
+        session.raw()
+        assert "compression complete" not in session.transcript.lower(), "editing did not run during compression"
+        session.send("\x0f", r"saved file[\s\S]*\x1b\[\?25h", raw=True)
+        assert file.read_bytes() == b"Z" + original, "background compression blocked saving"
+        session.notice(r"compression complete")
+        session.send("\x0c", r"Command: [^\r\n]*\x1b\[\?25h", raw=True)
+        session.transcript = ""
+        session.command(f"u {archive} {output}")
+        session.notice(r"decompression complete")
+        assert output.read_bytes() == original, "compression did not preserve its original snapshot"
+        session.command("q", exits=True)
+        session.restored()
+    finally:
+        session.close()
+
+
+def huffman_cleanup(folder):
+    file = folder / "background.txt"
+    archive = folder / "cancelled.mhf"
+    output = folder / "cancelled.out"
+    malformed = folder / "malformed.mhf"
+    malformed.write_bytes(b"not a Huffman archive")
+    session = Session(80)
+    try:
+        session.send("edit\n")
+        session.send(f"o {file}\n")
+        before = set(folder.iterdir())
+        text = session.send(f"u {folder / 'background.mhf'} {output} extra\n")
+        assert re.search(r"usage", text, re.I), "u accepted an extra argument"
+        assert set(folder.iterdir()) == before, "invalid u arguments created output"
+        session.transcript = ""
+        session.send(f"u {malformed} {output}\n")
+        session.notice(r"invalid|error")
+        assert set(folder.iterdir()) == before, "malformed archive left output or temporary files"
+        session.transcript = ""
+        session.send(f"c {archive}\n")
+        session.send("cancel\n")
+        session.notice(r"compression cancelled")
+        assert not archive.exists(), "cancel published a partial archive"
+        assert set(folder.iterdir()) == before, "cancel left temporary files"
+        session.transcript = ""
+        session.send(f"u {folder / 'background.mhf'} {output}\n")
+        session.send("cancel\n")
+        session.notice(r"decompression cancelled")
+        assert set(folder.iterdir()) == before, "decompression cancel left output or temporary files"
+        session.transcript = ""
+        session.send(f"c {archive}\n")
+        session.send("q\n", SHELL)
+        session.restored()
+        session.visual(f"edit {file}\n")
+        session.visual("\x0c")
+        session.command(f"c {archive}")
+        session.send("\x18", SHELL)
+        session.restored()
+        assert set(folder.iterdir()) == before, "fullscreen exit left output or temporary files"
+        assert set(folder.iterdir()) == before, "quit left background output or temporary files"
+        session.send("edit\n")
+        session.send("status\n")
+        session.send("q\n", SHELL)
+        session.restored()
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="moon-command-mode-") as directory:
         folder = Path(directory)
+        huffman_roundtrip(folder, False)
+        huffman_roundtrip(folder, True)
+        huffman_background(folder)
+        huffman_cleanup(folder)
         legacy_long_match(folder)
         cancel_command(folder)
         dirty_quit(folder)
@@ -394,4 +548,4 @@ if __name__ == "__main__":
         help_without_file()
         legacy_visual_return(folder)
         narrow_and_long_line(folder)
-    print("  ok   fullscreen commands, help, narrow UI, dirty protection and terminal restore")
+    print("  ok   editor commands, background Huffman, snapshots, cleanup and terminal restore")
