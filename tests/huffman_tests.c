@@ -124,3 +124,115 @@ static void invalid_archives(void)
     assert(run(archive, output, 1, 2).error == EINVAL);
     unlink(input); unlink(archive);
 }
+
+static void snapshot_and_destination(void)
+{
+    size_t size = 2 * 1024 * 1024;
+    unsigned char *data = malloc(size);
+    assert(data);
+    memset(data, 's', size);
+    char input[512], expected[512], archive[512], output[512];
+    path(input, "source"); path(expected, "expected");
+    path(archive, "archive"); path(output, "restored");
+    put(input, data, size); put(expected, data, size);
+    int fd = open(input, O_RDWR);
+    assert(fd >= 0);
+    HuffmanJob *job = huffman_start(fd, archive, 0, 4);
+    assert(job);
+    struct pollfd event = {huffman_event_fd(job), POLLIN, 0};
+    while (!huffman_status(job).snapshot_ready) assert(poll(&event, 1, 10000) > 0);
+    unsigned char edited = 'x';
+    assert(pwrite(fd, &edited, 1, 0) == 1);
+    assert(!wait_job(job).error);
+    huffman_destroy(job);
+    assert(!run(archive, output, 1, 4).error);
+    equal_files(expected, output);
+    unlink(archive);
+    job = huffman_start(fd, archive, 0, 4);
+    assert(job);
+    put(archive, &edited, 1);
+    assert(wait_job(job).error == EEXIST);
+    huffman_destroy(job);
+    int existing = open(archive, O_RDONLY);
+    unsigned char check;
+    assert(existing >= 0 && read(existing, &check, 1) == 1 && check == edited);
+    close(existing);
+    close(fd);
+    free(data);
+    unlink(input); unlink(expected); unlink(archive); unlink(output);
+}
+
+static void lifecycle(void)
+{
+    unsigned char data[65536];
+    memset(data, 7, sizeof data);
+    char input[512], output[512];
+    path(input, "input"); path(output, "output");
+    put(input, data, sizeof data);
+    int fd = open(input, O_RDWR);
+    assert(fd >= 0);
+    errno = 0;
+    assert(!huffman_start(fd, input, 0, 4) && errno == EEXIST);
+    int pipes[2];
+    assert(pipe(pipes) == 0);
+    errno = 0;
+    assert(!huffman_start(pipes[0], output, 0, 4) && errno == EINVAL);
+    close(pipes[0]); close(pipes[1]);
+    for (int i = 0; i < 20; ++i) {
+        HuffmanJob *job = huffman_start(fd, output, 0, 4);
+        assert(job);
+        huffman_cancel(job);
+        HuffmanStatus state = wait_job(job);
+        assert(state.cancelled && !state.error);
+        huffman_destroy(job);
+        assert(access(output, F_OK) < 0 && errno == ENOENT);
+    }
+    size_t large = 32 * 1024 * 1024;
+    assert(ftruncate(fd, (off_t)large) == 0);
+    HuffmanJob *job = huffman_start(fd, output, 0, 4);
+    assert(job);
+    struct pollfd event = {huffman_event_fd(job), POLLIN, 0};
+    HuffmanStatus state;
+    do {
+        state = huffman_status(job);
+        assert(!state.error && !state.done);
+        if (state.completed <= 2 * large) assert(poll(&event, 1, 10000) > 0);
+    } while (state.completed <= 2 * large);
+    huffman_cancel(job);
+    state = wait_job(job);
+    assert(state.cancelled && !state.error);
+    huffman_destroy(job);
+    assert(access(output, F_OK) < 0 && errno == ENOENT);
+    close(fd); unlink(input);
+}
+
+int main(void)
+{
+    assert(mkdtemp(directory));
+    roundtrip((const unsigned char *)"", 0);
+    roundtrip((const unsigned char *)"one line without a final newline", 32);
+    unsigned char single[70000];
+    memset(single, 0, sizeof single);
+    roundtrip(single, sizeof single);
+    unsigned char skewed[65535];
+    size_t position = 0;
+    for (unsigned symbol = 0; symbol < 16; ++symbol)
+        for (unsigned i = 0; i < (1U << symbol); ++i) skewed[position++] = (unsigned char)symbol;
+    roundtrip(skewed, position);
+    size_t size = 3 * 1024 * 1024 + 17;
+    unsigned char *binary = malloc(size);
+    assert(binary);
+    uint32_t seed = 17;
+    for (size_t i = 0; i < size; ++i) {
+        seed = seed * 1664525U + 1013904223U;
+        binary[i] = (unsigned char)(seed >> 24);
+    }
+    roundtrip(binary, size);
+    free(binary);
+    invalid_archives();
+    snapshot_and_destination();
+    lifecycle();
+    assert(rmdir(directory) == 0);
+    puts("Huffman roundtrip, determinism, corruption, cancellation: passed");
+    return 0;
+}
