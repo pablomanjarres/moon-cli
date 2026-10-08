@@ -441,3 +441,139 @@ static int write_chunks(HuffmanJob *job, int output)
     return 0;
 }
 
+static void *coordinate(void *argument)
+{
+    HuffmanJob *job = argument;
+    int output = -1;
+    char *temporary = NULL;
+    if (snapshot_input(job) < 0) goto failed;
+    if (job->decompress) {
+        if (archive_header(job, -1) < 0) goto failed;
+    } else {
+        pthread_t threads[MAX_WORKERS];
+        unsigned count = start_workers(job, threads, count_worker);
+        join_workers(threads, count);
+        if (stopped(job)) goto cleanup;
+    }
+    build_tree(job);
+    size_t length = strlen(job->output);
+    if (length > SIZE_MAX - 12) { errno = ENAMETOOLONG; goto failed; }
+    temporary = malloc(length + 12);
+    if (!temporary) goto failed;
+    memcpy(temporary, job->output, length);
+    memcpy(temporary + length, ".tmp-XXXXXX", 12);
+    output = mkstemp(temporary);
+    if (output < 0) goto failed;
+    if (!job->decompress && archive_header(job, output) < 0) goto failed;
+    if (write_chunks(job, output) < 0) goto failed;
+    if (fsync(output) < 0) goto failed;
+    if (close(output) < 0) { output = -1; goto failed; }
+    output = -1;
+    pthread_mutex_lock(&job->mutex);
+    if (!stopped_locked(job) && link(temporary, job->output) < 0) fail_locked(job, errno);
+    if (!stopped_locked(job)) {
+        job->status.completed = job->status.total;
+        job->status.done = 1;
+        notify_locked(job);
+    }
+    pthread_mutex_unlock(&job->mutex);
+    goto cleanup;
+failed:
+    fail(job, errno);
+cleanup:
+    if (output >= 0) close(output);
+    if (temporary) { unlink(temporary); free(temporary); }
+    if (job->input >= 0) { close(job->input); job->input = -1; }
+    if (job->snapshot >= 0) { close(job->snapshot); job->snapshot = -1; }
+    for (unsigned i = 0; i < job->window; ++i) free(job->slots[i].data);
+    pthread_mutex_lock(&job->mutex);
+    job->status.done = 1;
+    notify_locked(job);
+    pthread_mutex_unlock(&job->mutex);
+    return NULL;
+}
+
+HuffmanJob *huffman_start(int input_fd, const char *output, int decompress, unsigned workers)
+{
+    struct stat source, existing;
+    if (!output || !*output || fstat(input_fd, &source) < 0) {
+        if (!output || !*output) errno = EINVAL;
+        return NULL;
+    }
+    if (!S_ISREG(source.st_mode) || source.st_size < 0 ||
+        source.st_size > LLONG_MAX / 3) { errno = EINVAL; return NULL; }
+    if (lstat(output, &existing) == 0) { errno = EEXIST; return NULL; }
+    if (errno != ENOENT) return NULL;
+    HuffmanJob *job = calloc(1, sizeof *job);
+    if (!job) return NULL;
+    job->input = job->snapshot = job->events[0] = job->events[1] = -1;
+    job->input = dup(input_fd);
+    job->output = strdup(output);
+    if (job->input < 0 || !job->output || pipe(job->events) < 0) goto failed;
+    for (unsigned i = 0; i < 2; ++i)
+        if (fcntl(job->events[i], F_SETFL, O_NONBLOCK) < 0 ||
+            fcntl(job->events[i], F_SETFD, FD_CLOEXEC) < 0) goto failed;
+    int error = pthread_mutex_init(&job->mutex, NULL);
+    if (error) { errno = error; goto failed; }
+    error = pthread_cond_init(&job->changed, NULL);
+    if (error) { pthread_mutex_destroy(&job->mutex); errno = error; goto failed; }
+    job->source = source;
+    job->decompress = !!decompress;
+    job->workers = workers ? workers : 4;
+    if (job->workers > MAX_WORKERS) job->workers = MAX_WORKERS;
+    job->window = job->workers * 2;
+    job->size = (uint64_t)source.st_size;
+    job->chunks = job->size / CHUNK + (job->size % CHUNK != 0);
+    job->status.total = job->size * (decompress ? 1 : 3);
+    error = pthread_create(&job->coordinator, NULL, coordinate, job);
+    if (!error) return job;
+    pthread_cond_destroy(&job->changed);
+    pthread_mutex_destroy(&job->mutex);
+    errno = error;
+failed:;
+    int saved = errno;
+    if (job->input >= 0) close(job->input);
+    if (job->events[0] >= 0) close(job->events[0]);
+    if (job->events[1] >= 0) close(job->events[1]);
+    free(job->output); free(job);
+    errno = saved;
+    return NULL;
+}
+
+int huffman_event_fd(HuffmanJob *job)
+{
+    return job->events[0];
+}
+
+HuffmanStatus huffman_status(HuffmanJob *job)
+{
+    unsigned char events[128];
+    ssize_t count;
+    do count = read(job->events[0], events, sizeof events); while (count > 0 || (count < 0 && errno == EINTR));
+    pthread_mutex_lock(&job->mutex);
+    HuffmanStatus status = job->status;
+    pthread_mutex_unlock(&job->mutex);
+    return status;
+}
+
+void huffman_cancel(HuffmanJob *job)
+{
+    pthread_mutex_lock(&job->mutex);
+    if (!job->status.done) {
+        job->status.cancelled = 1;
+        pthread_cond_broadcast(&job->changed);
+        notify_locked(job);
+    }
+    pthread_mutex_unlock(&job->mutex);
+}
+
+void huffman_destroy(HuffmanJob *job)
+{
+    if (!job) return;
+    huffman_cancel(job);
+    pthread_join(job->coordinator, NULL);
+    close(job->events[0]); close(job->events[1]);
+    pthread_cond_destroy(&job->changed);
+    pthread_mutex_destroy(&job->mutex);
+    free(job->output); free(job);
+}
