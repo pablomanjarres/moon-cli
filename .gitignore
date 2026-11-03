@@ -11,3 +11,11 @@ tasks/
 
 # private course material (never commit)
 .private/
+
+# kernel module build output (make -C kernel)
+kernel/*.ko
+kernel/*.mod
+kernel/*.mod.c
+kernel/.*.cmd
+kernel/Module.symvers
+kernel/modules.order
