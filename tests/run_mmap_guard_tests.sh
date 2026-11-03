@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds kernel/mmap_guard.ko, loads it on a test file and runs the attacks against it.
 # Linux only. Needs sudo for insmod/rmmod/dmesg and the running kernel's build tree
-# (override with KDIR=/path/to/kernel/build).
+# (override with KDIR=/path/to/kernel/build, and KCC=gcc-NN when the kernel was built
+# with a different compiler than the default gcc).
 set -e
 
 cd "$(dirname "$0")/.."
@@ -15,7 +16,7 @@ trap 'unload; rm -rf "$B"' EXIT
 fail() { echo "  FAIL $1"; exit 1; }
 
 make >/dev/null
-make -C kernel ${KDIR:+KDIR=$KDIR} 2>&1 | grep -iE "warning|error" && fail "module builds without warnings"
+make -C kernel ${KDIR:+KDIR=$KDIR} ${KCC:+CC=$KCC} 2>&1 | grep -iE "warning|error" && fail "module builds without warnings"
 echo "  ok   module builds without warnings"
 
 CFLAGS="-Wall -Wextra -Werror -std=gnu99 -D_GNU_SOURCE -O2 -pthread"
