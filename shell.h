@@ -16,7 +16,7 @@
  *   registry.c      command table + help + suggestions
  *   ui.c / ui.h     everything visual (colors, boxes, syscall tracing)
  *   cat_data.c      file commands      (open, read, write, stat...)
- *   cat_memory.c    memory commands    (sbrk, mmap...)
+ *   cat_memory.c    memory commands    (sbrk, mmap, file mappings)
  *   cat_process.c   process commands   (fork, exec, kill, getrusage...)
  *   cat_util.c      small utilities    (greet, time, date...)
  *   cat_editor.c    the text editor    (open, read, write, lseek, ftruncate)
@@ -93,6 +93,7 @@ int cmd_d_create(int argc, char **argv);   /* open(2), write(2), close(2)       
 /* --- memory (cat_memory.c) --- */
 /* int cmd_m_sbrk(int argc, char **argv); */   /* sbrk / brk                         */
 /* int cmd_m_mmap(int argc, char **argv); */   /* mmap, munmap                       */
+int cmd_m_fmap(int argc, char **argv);     /* open, mmap, mprotect, munmap      DONE */
 /* int cmd_m_info(int argc, char **argv); */   /* /proc/self/status                  */
 
 /* --- process (cat_process.c) --- */
