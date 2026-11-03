@@ -126,81 +126,44 @@ cargué y descargué el módulo, revisé `dmesg` y ejecuté los ataques con y si
 | **kretprobe en ganchos LSM** | Una comparación por mmap | Igual a LSM | Sí |
 | Instrumentar `handle_mm_fault` | Alto: cada fallo | Solo el primer acceso | Sí |
 
-## Parte III: implementación y argumentación
+## Parte III: implementación y resultados
 
-### Código
+El módulo resuelve el inode de `path` al cargar. En cada `mmap` o `mprotect`
+compara ese inode. Si el archivo es el protegido y la petición pide `PROT_EXEC` o
+escritura compartida, cambia la respuesta a `-EACCES`. Registra cada decisión en
+`dmesg` y la cuenta en `/sys/module/mmap_guard/parameters/{allowed,denied}`. Debe
+estar en el kernel porque, después del primer fallo, los accesos por puntero no
+pasan por ninguna biblioteca. Además, una syscall directa evita `LD_PRELOAD`.
 
-- `kernel/mmap_guard.c` resuelve el inode de `path` al cargar y registra dos
-  kretprobes. El manejador de entrada compara el inode. Si no coincide, devuelve 1 y
-  no se ejecuta el de retorno. Para el archivo protegido niega `PROT_EXEC` y
-  `PROT_WRITE` con mapeo compartido, y permite lo demás. El manejador de retorno
-  cambia el 0 del gancho por `-EACCES` antes de crear la VMA o modificarla. Cada
-  decisión se registra en `dmesg` con pid, uid, comm y `prot`, y se cuenta en
-  `/sys/module/mmap_guard/parameters/{allowed,denied}`.
-- `kernel/Makefile` usa Kbuild. El `Makefile` principal sigue compilando moon igual.
-- `cat_memory.c` contiene `m_fmap`.
-- `tests/mmap_attacks.c` prueba los ataques. `tests/mmap_bench.c` mide el costo y
-  `tests/run_mmap_guard_tests.sh` ejecuta todo.
+**Pruebas** (Ubuntu 26.04 en WSL2, kernel 6.18.54.1): pasaron las 18
+comprobaciones. Sin el módulo, el mismo usuario sí puede escribir el archivo por
+mmap. Con el módulo:
 
-### Por qué en el kernel
+- Se permiten la lectura y la copia privada.
+- Se rechazan con `EACCES` la escritura compartida, `MAP_SHARED_VALIDATE`, la
+  ejecución y las ampliaciones con `mprotect`.
+- En la carrera Dirty COW, el kernel aceptó 153 736 escrituras por
+  `/proc/self/mem`. Todas quedaron en la copia privada y el archivo no cambió.
+- `m_fmap w` muestra `mmap -> -1 EACCES`.
 
-Después del primer fallo, un acceso por puntero no ejecuta ninguna instrucción del
-kernel. Una biblioteca en espacio de usuario solo puede envolver `mmap()`, y
-cualquier binario estático o `syscall(SYS_mmap)` la evita. Los ganchos LSM están en
-el único punto obligatorio: crear la VMA o ampliar sus permisos. Negar ahí impide
-que se instale una PTE escribible. Por eso no hace falta inspeccionar cada
-escritura, que sería imposible a la velocidad del hardware.
+**Sobrecosto** (`mmap` + primer acceso + `munmap`, mediana de 5 corridas de 200000):
 
-### Resultados
+| Archivo | Sin módulo | Con módulo |
+|---|---|---|
+| Protegido | 8560 ns | 8445 ns |
+| Otro | 8809 ns | 8976 ns |
 
-`KDIR=... KCC=gcc-13 sh tests/run_mmap_guard_tests.sh` se ejecutó en Ubuntu 26.04
-sobre WSL2, con kernel 6.18.54.1-microsoft-standard-WSL2 y 6 núcleos. El árbol del
-kernel se compiló con gcc 13, el mismo compilador del kernel en ejecución. Con
-gcc 15, `insmod` rechazó el módulo porque `struct module` tenía otro tamaño.
+La diferencia es menor al 2 % y queda dentro del ruido entre corridas. El número de
+fallos de página no cambia, porque el módulo no toca `handle_mm_fault`. Medí con
+`clock_gettime` y `getrusage` porque WSL no trae `perf`.
 
-Las 18 comprobaciones pasaron. El módulo compila sin advertencias. Sin el módulo, el
-mismo usuario sí puede crear el mapeo compartido escribible: es el grupo de control.
-Con el módulo:
+**Limitaciones:**
 
-- Se permiten la lectura compartida, la copia privada y la lectura compartida sobre un
-  descriptor `O_RDWR`. Los bytes mapeados coinciden con `read()`.
-- Se rechazan con `EACCES` la escritura compartida (`MAP_SHARED` y
-  `MAP_SHARED_VALIDATE`), la ejecución y las ampliaciones con `mprotect` a escritura
-  o ejecución.
-- En la carrera Dirty COW, el kernel aceptó 153 736 escrituras por `/proc/self/mem`.
-  Todas cayeron en la copia privada y el archivo quedó idéntico byte a byte.
-- `m_fmap w` muestra `mmap -> -1 EACCES`. `dmesg` registra cada decisión y los
-  contadores terminaron en `allowed=6 denied=6`.
-- Al descargar el módulo, la escritura compartida vuelve a funcionar.
-
-Medición con 200000 iteraciones de `mmap` de una página, primer acceso y `munmap`:
-
-| Archivo | Sin módulo (ns, mediana de 5) | Con módulo (ns, mediana de 5) | Diferencia |
-|---|---|---|---|
-| Protegido (entrada completa del probe) | 8560 | 8445 | -1.3 % |
-| Otro archivo (solo comparación de inode) | 8809 | 8976 | +1.9 % |
-
-Cada iteración produjo un fallo de página menor, igual con y sin módulo. Por lo
-tanto, el módulo no cambia la tasa de fallos: actúa antes de crear la VMA, no en
-`handle_mm_fault`. Las diferencias son menores que la variación entre corridas,
-de 7771 a 8883 ns. En esta máquina, el sobrecosto no se distingue del ruido. Se
-midió con `clock_gettime` y `getrusage`, porque el kernel de WSL no trae `perf` ni
-`strace`. El costo esperado es el de un kprobe por `mmap` y `mprotect`; las lecturas
-y escrituras por puntero no tienen costo adicional.
-
-### Limitaciones y trabajo futuro
-
-- **Escrituras normales.** El módulo protege mmap. Las escrituras con `write()`
-  siguen sujetas a los permisos POSIX. Un tercer gancho en
-  `security_file_permission` cerraría ese camino a costa de una comparación por cada
-  `read`/`write` del sistema.
-- **Mapeos previos.** Un mapeo creado antes de cargar el módulo sigue vigente.
-- **Root.** Root puede descargar el módulo. Con `lockdown=integrity` y módulos
-  firmados, o con el mismo código como BPF LSM fijado al arranque, se evita.
-- **kprobes.** Se pueden desactivar o pueden cambiar los nombres de los símbolos. Un
-  LSM compilado o BPF LSM es más estable.
-- **Un archivo.** Se protege un solo archivo, identificado por inode. Si se renombra
-  el archivo, sigue protegido. Si se reemplaza por otro inode, no.
-- **Memoria física.** Un proceso con acceso a la RAM, DMA o un hipervisor
-  comprometido ve los datos en claro. Mitigaciones: IOMMU para DMA, Intel TME/AMD SME
-  para cifrar la RAM y SEV-SNP/TDX para aislar la VM del hipervisor.
+- `write()` sigue dependiendo de los permisos POSIX. Se podría cubrir con un
+  gancho en `security_file_permission`.
+- Los mapeos creados antes de cargar el módulo siguen activos.
+- Root puede descargar el módulo. Para evitarlo se necesita `lockdown` o BPF LSM
+  desde el arranque.
+- El módulo solo protege un archivo.
+- No protege contra acceso físico a la RAM o DMA. Para eso se usan IOMMU, TME/SME y
+  SEV-SNP/TDX.
