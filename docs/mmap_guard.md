@@ -130,3 +130,80 @@ SMAP impiden que el kernel ejecute o lea memoria de usuario sin intención. Un a
 mapeado sin `PROT_EXEC` tiene NX, así que código inyectado ahí produce `#PF`. Por
 eso el módulo también niega `PROT_EXEC`.
 
+## Parte II: estrategia con apoyo de IA
+
+### Flujo de trabajo
+
+La IA se usó como asistente de un ingeniero, no como fuente de verdad. Cada
+afirmación sobre el kernel se verificó con el código fuente de la versión probada.
+
+- **Exploración.** La IA comparó caminos de intercepción: tabla de syscalls, LSM,
+  kprobes, eBPF y `vm_ops->fault`. También identificó las funciones por donde pasan
+  todas las rutas. Las firmas y las líneas citadas se verificaron en el árbol de
+  Linux 6.18.
+- **Código C.** La IA generó el primer borrador del módulo y de `m_fmap`. Se revisó
+  cada símbolo: que exista, que sea sondeable y que use la API actual
+  (`regs_get_kernel_argument`, `module_param_cb`). Se compiló con `-Wall` y con
+  Kbuild sin advertencias.
+- **Pruebas y PoC.** La IA propuso los vectores: mapeo compartido escribible,
+  `MAP_SHARED_VALIDATE`, ampliación con `mprotect`, ejecución y carrera Dirty COW.
+  Cada prueba compara el archivo con `read()` antes y después. No se acepta solo el
+  código de retorno.
+
+### Prompts estructurados
+
+| # | Contexto | Rol | Restricción | Resultado esperado |
+|---|---|---|---|---|
+| 1 | Enunciado del parcial y repositorio moon con dos parciales previos | Arquitecto de kernel Linux | Solución simple, compatible con 5.x/6.x, módulo cargable y sin parchear el kernel | Comparación de puntos de intercepción y elección justificada |
+| 2 | Kernel 6.18 WSL2, `CONFIG_KRETPROBES=y`, `CONFIG_MODVERSIONS=y` | Programador de módulos | Usar solo símbolos sondeables o exportados, sin CR0, sin `sys_call_table` y sin advertencias | `mmap_guard.c` con política, registro y contadores |
+| 3 | Contrato `ui_trace_*` de moon y plantilla de `cat_data.c` | Desarrollador del shell | Mismo estilo de los comandos existentes y compilación en Linux y macOS | Comando `m_fmap` con traza de cada syscall |
+| 4 | Política: denegar escritura compartida y ejecución | Analista de pruebas ofensivas | Usuario sin privilegios con permiso POSIX de escritura y verificación por contenido | `mmap_attacks.c`, carrera Dirty COW y prueba sin módulo como control |
+| 5 | Resultados de la medición | Revisor de rendimiento | Medir solo lo que se puede reproducir en la máquina | Microbenchmark mmap+fallo+munmap con y sin módulo |
+
+### Alucinaciones detectadas y corrección
+
+| Sugerencia | Problema | Verificación |
+|---|---|---|
+| Sobrescribir `sys_call_table` obtenida con `kallsyms_lookup_name()` | No está exportada desde 5.7 | `kernel/kallsyms.c`: no tiene `EXPORT_SYMBOL` |
+| Desactivar la protección con `write_cr0(read_cr0() & ~X86_CR0_WP)` | El kernel fija CR0.WP y lo restaura. Además, es inseguro con varias CPU | `arch/x86/kernel/cpu/common.c:422` |
+| Registrar un LSM desde el módulo con `security_add_hooks()` | Es `__init`; los LSM se compilan dentro del kernel | `security/security.c:629` |
+| Gancho `file_mmap` con firma `(file, reqprot, prot, flags, addr, addr_only)` | Es la firma de 3.x. Ahora es `mmap_file(file, reqprot, prot, flags)`, y el wrapper sondeado recibe `(file, prot, flags)` | `include/linux/lsm_hook_defs.h:202`, `security/security.c:3132` |
+| Usar `VM_MAYSHARE` para decidir si `mprotect` escribe en el archivo | Un `MAP_SHARED` sobre `O_RDONLY` conserva `VM_MAYSHARE` sin `VM_SHARED`. Se usa `VM_SHARED` | `mm/mmap.c:464` |
+
+### Validación manual
+
+1. Se descargó el árbol `linux-msft-wsl-6.18.54.1` del kernel en ejecución. Se aplicó
+   su `/proc/config.gz` y se compiló para obtener `Module.symvers`, porque
+   `CONFIG_MODVERSIONS=y`.
+2. Se buscó con `grep` cada símbolo, firma y bandera usado en el módulo.
+3. Se compiló el módulo sin advertencias y se cargó y descargó con `insmod`/`rmmod`.
+   Se verificó `dmesg` en ambos casos.
+4. Se ejecutaron los ataques sin el módulo como grupo de control y con el módulo.
+
+### Arquitectura
+
+```text
+ Ring 3   proceso: mmap(fd, PROT_WRITE, MAP_SHARED)      mprotect(addr, PROT_WRITE)
+ -------------------------- syscall ----------------------------------------------
+ Ring 0   vm_mmap_pgoff()                                do_mprotect_pkey()
+              |                                               |
+          security_mmap_file()  <-- kretprobe -->  security_file_mprotect()
+              |        mmap_guard: ¿inode protegido?          |
+              |        sí + (escritura compartida | exec) -> -EACCES
+              |        no -> 0 (solo una comparación de puntero)
+          do_mmap() -> VMA                         mprotect_fixup()
+              |
+          #PF -> handle_mm_fault() -> filemap_fault() -> PTE   (sin cambios)
+```
+
+### Matriz de compensaciones
+
+| Opción | Latencia de mmap/fallos | Cobertura | Cargable sin recompilar | Riesgo |
+|---|---|---|---|---|
+| `LD_PRELOAD` | Ninguna | Nula: se evita con syscall directa | Sí | Bajo |
+| Hook en `sys_call_table` | Baja | Parcial: no cubre caminos internos | No en 6.x | Alto: bloqueado por CR0/CFI |
+| LSM compilado | Mínima | Total en creación y cambio de permisos | No | Bajo |
+| BPF LSM | Mínima | Igual a LSM | Sí, requiere `bpf` en `lsm=` | Bajo |
+| **kretprobe en ganchos LSM (elegida)** | Baja: una comparación por mmap | Igual a LSM para mmap/mprotect | Sí | Medio: depende de símbolos sondeables |
+| Instrumentar `handle_mm_fault` | Alta: cada fallo | Por página, solo el primer acceso | Sí | Alto |
+
