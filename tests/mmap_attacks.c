@@ -58,6 +58,7 @@ static int try_map(int oflag, int prot, int flags, char **out)
  * ------------------------------------------------------------------------------------ */
 static char *race_map;
 static volatile int race_stop;
+static long race_writes;   /* pwrite calls the kernel accepted (they land in the COW copy) */
 
 static void *race_madvise(void *arg)
 {
@@ -71,7 +72,8 @@ static void *race_procmem(void *arg)
     (void)arg;
     int fd = open("/proc/self/mem", O_RDWR);
     if (fd == -1) return NULL;
-    while (!race_stop) pwrite(fd, "PWND", 4, (off_t)(unsigned long)race_map);
+    while (!race_stop)
+        if (pwrite(fd, "PWND", 4, (off_t)(unsigned long)race_map) == 4) race_writes++;
     close(fd);
     return NULL;
 }
@@ -92,6 +94,7 @@ static void dirty_cow_race(double seconds)
     pthread_join(a, NULL);
     pthread_join(b, NULL);
     munmap(race_map, len);
+    printf("       %ld writes through /proc/self/mem were accepted\n", race_writes);
     check("race: madvise + /proc/self/mem leaves the file intact", file_intact());
 }
 
