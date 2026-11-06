@@ -85,29 +85,68 @@ las tablas de páginas de quien la mapea, y `/proc/pid/mem` exige
 Contra la lectura física de la RAM o por DMA se usan cifrado de memoria (AMD SME/SEV,
 Intel TME) e IOMMU.
 
-**6. Páginas sucias y msync.** Escribir por el puntero solo marca sucia la PTE. El
-writeback, `msync()` o `fsync()` las llevan al disco. Un filtro sobre `write()` no
-ve esos cambios. Por eso el módulo impide crear el mapeo escribible.
+**6. Páginas sucias, msync y fsync.** En un mapeo compartido escribible, la PTE
+empieza sin permiso de escritura. La primera escritura a una página limpia produce un
+fallo: `do_shared_fault()` llama a `->page_mkwrite` y marca la página sucia
+(`folio_mark_dirty`). Después deja la PTE escribible, con el bit dirty que pone la
+MMU. El writeback escribe las páginas sucias con `->writepages`. Antes, con
+`folio_mkclean()`, quita otra vez la escritura de las PTE para detectar la próxima
+escritura. `msync(MS_SYNC)` y `fsync()` inician ese writeback y esperan a que
+termine. `munmap()` y la reclamación de memoria también pasan el bit dirty de la PTE
+a la página.
 
-**7. eBPF.** Sin recompilar, un programa en `kprobe`/`fexit` sobre
-`security_mmap_file` o el tracepoint `page_fault_user` puede registrar pid, inode y
-`prot`. BPF LSM (`lsm/mmap_file`, `CONFIG_BPF_LSM=y`) también puede bloquear. El
-límite es que no ve los accesos después del primer fallo.
+Así se evaden los filtros: un filtro que inspecciona `write()` no ve las escrituras
+por puntero. Además, `page_mkwrite` solo avisa en la primera escritura sobre una
+página limpia. Los bytes siguientes cambian sin aviso hasta el próximo writeback, así
+que un atacante puede escribir después de la inspección. Por eso el módulo impide
+crear el mapeo compartido escribible.
 
-**8. O_RDONLY con PROT_WRITE y MAP_PRIVATE.** Se permite porque la escritura queda
-en una copia privada y nunca llega al archivo. El riesgo es que el proceso altere
-su propia vista. Si COW falla, como en Dirty COW, esto se vuelve escritura real.
+**7. Auditoría con eBPF.** Sin recompilar, bpftrace o libbpf cargan programas en
+kprobes y `fentry`/`fexit`. Se pueden poner sobre `security_mmap_file`,
+`security_file_mprotect` y `handle_mm_fault`, o en los tracepoints
+`syscalls:sys_enter_mmap` y `exceptions:page_fault_user`. El programa guarda pid,
+uid, inode, `prot` y dirección en mapas BPF o en un ring buffer. Con eso detecta
+patrones anómalos, como un proceso que mapea con escritura un inode sensible o un
+número inusual de fallos de escritura por segundo. El verificador garantiza que el
+programa no rompa el kernel. Para bloquear, BPF LSM (`lsm/mmap_file`, compilado en el
+kernel probado) devuelve `-EPERM`. Límite: después del primer fallo, los accesos por
+puntero no generan eventos.
 
-**9. Carreras con MADV_DONTNEED.** El parche de Dirty COW agregó `FOLL_COW`. Desde
-6.1, `can_follow_write_pte()` (`mm/gup.c:785`) solo permite escribir con
-`FOLL_FORCE` en páginas anónimas exclusivas. Además, `mmap_lock` y el lock de la
-tabla de páginas ordenan las dos operaciones. La prueba de carrera confirma que el
-archivo no cambia.
+**8. O_RDONLY con PROT_WRITE y MAP_PRIVATE.** Sí se permite. `do_mmap()` solo exige
+`FMODE_WRITE` para `MAP_SHARED` con `PROT_WRITE`. Con `MAP_PRIVATE`, la escritura cae
+en una copia COW anónima y nunca llega al archivo. Implica tres riesgos:
 
-**10. struct page, tablas de páginas y bits.** `struct page` indica si una página es
-del page cache o anónima. La MMU recorre PGD→P4D→PUD→PMD→PTE y verifica los bits:
-R/W bloquea escrituras, U/S bloquea el acceso a memoria del kernel y NX bloquea la
-ejecución. Un mapeo sin `PROT_EXEC` tiene NX, por eso el módulo niega `PROT_EXEC`.
+- **Alteración temporal.** El proceso cambia su propia vista hasta `munmap`, por
+  ejemplo una configuración o un código ya cargados.
+- **Fuga de información.** Los datos quedan en páginas anónimas que pueden ir a swap
+  o a un volcado de memoria.
+- **Cambios ajenos.** Las páginas aún no escritas siguen mostrando lo que otros
+  escriban en el archivo.
+
+Si COW falla, como en Dirty COW, esto se vuelve una escritura real. El módulo permite
+este caso y la prueba confirma que el archivo no cambia.
+
+**9. Carreras con MADV_DONTNEED.** El parche de Dirty COW (commit 19be0eaffa3a,
+Linux 4.9) dejó de quitar `FOLL_WRITE` al reintentar y agregó `FOLL_COW`. En 6.0,
+`FOLL_COW` se eliminó (commit 5535be309971). Desde entonces, `can_follow_write_pte()`
+(`mm/gup.c:785`) solo permite escribir con `FOLL_FORCE` si la página es anónima y
+exclusiva de esa VMA (`PageAnonExclusive`), nunca en una del page cache.
+`madvise(MADV_DONTNEED)` y GUP pueden correr en paralelo con `mmap_lock` en lectura.
+El lock de la tabla de páginas serializa cada cambio de PTE, y si la PTE desaparece,
+GUP vuelve a resolver el fallo con una copia nueva. Desde 6.12,
+`proc_mem.force_override` (`fs/proc/base.c:126`) permite prohibir del todo esas
+escrituras forzadas.
+
+**10. struct page, tablas de páginas y bits de la MMU.** Cada marco físico tiene un
+`struct page` o folio con un contador de referencias, `mapping` (page cache o
+anónima) y banderas. Con ellos, el kernel decide si una escritura va a la página
+compartida o a una copia. La MMU traduce cada dirección con PGD→P4D→PUD→PMD→PTE y
+verifica en hardware los bits de cada nivel. R/W impide escribir páginas de solo
+lectura, U/S impide que Ring 3 acceda a las páginas del kernel y NX impide ejecutar
+páginas de datos. SMEP y SMAP impiden que el kernel ejecute o lea memoria de usuario por error. Un
+archivo mapeado sin `PROT_EXEC` tiene NX en sus PTE, así que el código inyectado ahí
+produce `#PF`. Para que ese control no se pueda desactivar, el módulo niega
+`PROT_EXEC` y su ampliación con `mprotect()`.
 
 ## Parte II: estrategia con IA
 
