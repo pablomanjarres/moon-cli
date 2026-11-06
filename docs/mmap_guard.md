@@ -237,42 +237,84 @@ antes de que exista la VMA. El camino de fallos de página no cambia.
 
 ## Parte III: implementación y resultados
 
-El módulo resuelve el inode de `path` al cargar. En cada `mmap` o `mprotect`
-compara ese inode. Si el archivo es el protegido y la petición pide `PROT_EXEC` o
-escritura compartida, cambia la respuesta a `-EACCES`. Registra cada decisión en
-`dmesg` y la cuenta en `/sys/module/mmap_guard/parameters/{allowed,denied}`. Debe
-estar en el kernel porque, después del primer fallo, los accesos por puntero no
-pasan por ninguna biblioteca. Además, una syscall directa evita `LD_PRELOAD`.
+### Código
 
-**Pruebas** (Ubuntu 26.04 en WSL2, kernel 6.18.54.1): pasaron las 18
-comprobaciones. Sin el módulo, el mismo usuario sí puede escribir el archivo por
-mmap. Con el módulo:
+- `kernel/mmap_guard.c`: el módulo. Tiene la política en `verdict()`, las dos
+  kretprobes y el registro con contadores en
+  `/sys/module/mmap_guard/parameters/{allowed,denied}`.
+- `kernel/Makefile`: compila el módulo con Kbuild.
+- `cat_memory.c`: el comando `m_fmap`.
+- Pruebas: `tests/run_mmap_guard_tests.sh` y `tests/mmap_attacks.c`.
+- Medición: `tests/mmap_overhead.sh` y `tests/mmap_bench.c`.
+- Demostración: `kernel/demo.sh`.
+
+El módulo compila sin advertencias contra Linux 6.18, 5.15 y 5.10, y se ejecutó en 6.18.
+
+### Por qué en el kernel
+
+Después del primer fallo, un acceso por puntero no ejecuta ninguna instrucción del
+kernel. Una biblioteca en espacio de usuario solo puede envolver `mmap()`, y
+cualquier binario estático o `syscall(SYS_mmap)` la evita. Los ganchos LSM son el
+único punto obligatorio: crear la VMA o ampliar sus permisos. Negar ahí impide que se
+instale una PTE escribible, así que no hace falta inspeccionar cada escritura, algo
+imposible a la velocidad del hardware.
+
+### Pruebas
+
+`sh tests/run_mmap_guard_tests.sh` pasó las 18 comprobaciones en Ubuntu 26.04 sobre
+WSL2, con kernel 6.18.54.1. Sin el módulo, el mismo usuario sí puede escribir el
+archivo por mmap: ese es el grupo de control. Con el módulo:
 
 - Se permiten la lectura y la copia privada.
 - Se rechazan con `EACCES` la escritura compartida, `MAP_SHARED_VALIDATE`, la
   ejecución y las ampliaciones con `mprotect`.
-- En la carrera Dirty COW, el kernel aceptó 153 736 escrituras por
-  `/proc/self/mem`. Todas quedaron en la copia privada y el archivo no cambió.
-- `m_fmap w` muestra `mmap -> -1 EACCES`.
+- En la carrera Dirty COW, el kernel aceptó 153 736 escrituras por `/proc/self/mem`.
+  Todas quedaron en la copia privada y el archivo no cambió.
+- `dmesg` registra cada decisión con pid, uid y programa.
 
-**Sobrecosto** (`mmap` + primer acceso + `munmap`, mediana de 5 corridas de 200000):
+strace muestra que el rechazo viene del kernel, en la frontera de la syscall:
 
-| Archivo | Sin módulo | Con módulo |
-|---|---|---|
-| Protegido | 8560 ns | 8445 ns |
-| Otro | 8809 ns | 8976 ns |
+```text
+mmap(NULL, 29, PROT_READ|PROT_WRITE, MAP_SHARED, 3, 0) = -1 EACCES (Permission denied)
+```
 
-La diferencia es menor al 2 % y queda dentro del ruido entre corridas. El número de
-fallos de página no cambia, porque el módulo no toca `handle_mm_fault`. Medí con
-`clock_gettime` y `getrusage` porque WSL no trae `perf`.
+### Sobrecosto
 
-**Limitaciones:**
+`sh tests/mmap_overhead.sh`: 42 016 llamadas a `mmap()` por corrida (la mitad sobre
+el archivo protegido), mediana de 3 corridas.
 
-- `write()` sigue dependiendo de los permisos POSIX. Se podría cubrir con un
-  gancho en `security_file_permission`.
+| Medida | Herramienta | Sin módulo | Con módulo |
+|---|---|---|---|
+| Tiempo en kernel por `mmap()` (`vm_mmap_pgoff`) | ftrace function_graph | 2640 ns | 2899 ns (+10 %) |
+| Tiempo por fallo de página (`handle_mm_fault`) | ftrace function_graph | 976 ns | 975 ns |
+| Fallos de página atendidos | ftrace | 42 070 | 42 070 |
+| `mmap()` por llamada | strace -c | 31 µs | 31 µs |
+| Ciclo `mmap` + acceso + `munmap`, archivo protegido | `clock_gettime`, mediana de 5 | 8560 ns | 8445 ns |
+
+La sonda agrega unos 260 ns por `mmap()`. Ese tiempo incluye la entrada a la
+kretprobe, la comparación del inode y, para el archivo protegido, la decisión y el
+registro. Es un 3 % del ciclo completo, menos que la variación entre corridas (7771 a
+8883 ns). El tiempo y la cantidad de fallos de página no cambian, porque el módulo no
+toca `handle_mm_fault`. Con strace, el costo de ptrace (unos 30 µs por llamada) oculta
+la diferencia, por eso ftrace es la medida de referencia. ftrace también suma su
+propio costo, pero las dos corridas lo pagan por igual.
+
+### Limitaciones y trabajo futuro
+
+Vectores aún descubiertos:
+
+- `write()`, `pwrite()` y `ftruncate()` siguen dependiendo de los permisos POSIX. Se
+  cubrirían con un gancho en `security_file_permission`.
 - Los mapeos creados antes de cargar el módulo siguen activos.
-- Root puede descargar el módulo. Para evitarlo se necesita `lockdown` o BPF LSM
-  desde el arranque.
-- El módulo solo protege un archivo.
-- No protege contra acceso físico a la RAM o DMA. Para eso se usan IOMMU, TME/SME y
-  SEV-SNP/TDX.
+- Root puede descargar el módulo o desactivar todos los kprobes
+  (`/sys/kernel/debug/kprobes/enabled`).
+- Un montaje overlayfs puede presentar otro inode y no coincidir con el protegido.
+- Se protege un solo archivo, por inode.
+
+Mitigaciones de hardware e hipervisor:
+
+- Fijar la política desde el arranque, con BPF LSM o un LSM compilado, lockdown y
+  módulos firmados. El hipervisor puede además dejar la memoria del kernel en solo
+  lectura con EPT, como hace HVCI.
+- Usar IOMMU contra el acceso por DMA, Intel TME o AMD SME contra la lectura física de
+  la RAM, y SEV-SNP o TDX contra un hipervisor comprometido.
