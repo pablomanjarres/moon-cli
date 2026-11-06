@@ -19,7 +19,7 @@
  * ==================================================================================== */
 const Category categories[] = {
     { "data",    "Files and data",     "open · read · write · stat"     },
-    { "memory",  "Process memory",     "sbrk · mmap · /proc"            },
+    { "memory",  "Process memory",     "sbrk · mmap · mprotect · /proc"            },
     { "process", "Processes & signals", "fork · exec · kill · getrusage" },
     { "util",    "Utilities",          "getuid · time"                  },
     { "editor",  "Text editor",        "open · read · write · lseek · ftruncate · termios" },
@@ -77,6 +77,13 @@ const Command commands[] = {
       "mmap(2) · munmap(2)",
       "cat_memory.c",
       NULL },
+
+    { "m_fmap", "memory",
+      "m_fmap <file> <r|w|p|x|u>",
+      "Map a file and touch it; kernel/mmap_guard.ko can refuse the mapping.",
+      "open(2) · fstat(2) · mmap(2) · mprotect(2) · msync(2) · munmap(2)",
+      "cat_memory.c",
+      cmd_m_fmap },                        /* <- IMPLEMENTED */
 
     { "m_info", "memory",
       "m_info",

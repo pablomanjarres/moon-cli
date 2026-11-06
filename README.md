@@ -44,7 +44,7 @@ Every command traces the syscalls it makes:
   └ ✔  'hi.txt' created with 3 bytes.
 ```
 
-`d_create`, `p_fork` and `color` are implemented. The other 12 show up in `help` marked
+`d_create`, `p_fork`, `color` and `m_fmap` are implemented. The other 12 show up in `help` marked
 `○` and are yours to write — each one tells you which file and which syscalls it needs.
 
 `color` has its own page: [docs/color.md](docs/color.md).
@@ -52,5 +52,8 @@ The text editor's design and commands are in [docs/editor.md](docs/editor.md).
 The technical report is available as [docs/editor.pdf](docs/editor.pdf).
 The concurrent Huffman project is in [docs/huffman.md](docs/huffman.md),
 with its technical report in [docs/huffman.pdf](docs/huffman.pdf).
+The mmap security project (kernel module `kernel/mmap_guard.c` and the `m_fmap`
+command) is in [docs/mmap_guard.md](docs/mmap_guard.md), with its report in
+[docs/mmap_guard.pdf](docs/mmap_guard.pdf).
 
 MIT.
