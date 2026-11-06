@@ -56,4 +56,27 @@ The mmap security project (kernel module `kernel/mmap_guard.c` and the `m_fmap`
 command) is in [docs/mmap_guard.md](docs/mmap_guard.md), with its report in
 [docs/mmap_guard.pdf](docs/mmap_guard.pdf).
 
+## Kernel mmap guard
+
+`kernel/mmap_guard.ko` refuses writable shared and executable mappings of one file,
+including upgrades through `mprotect()`. Linux only. Needs `sudo` and the build tree
+of the running kernel (`/lib/modules/$(uname -r)/build`, or pass `KDIR=`).
+
+```bash
+make && make -C kernel
+echo "confidential" > /tmp/moon_secret.txt
+sudo insmod kernel/mmap_guard.ko path=/tmp/moon_secret.txt
+./moon                      # m_fmap /tmp/moon_secret.txt w  ->  mmap ... = -1 EACCES
+sudo rmmod mmap_guard
+```
+
+| Script | What it does |
+|---|---|
+| `sh kernel/demo.sh` | Step-by-step demo; press Enter to advance |
+| `sh tests/run_mmap_guard_tests.sh` | Attacks with and without the module, kernel log and counters |
+| `sh tests/mmap_overhead.sh` | Overhead on `mmap()` and page faults, measured with ftrace and strace |
+
+If the kernel was built with a compiler other than the default `gcc`, pass
+`CC=gcc-NN` to `make -C kernel` and `KCC=gcc-NN` to the scripts.
+
 MIT.
