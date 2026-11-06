@@ -7,55 +7,83 @@ Pablo Manjarres
 ## Objetivo y uso
 
 El módulo `kernel/mmap_guard.ko` protege un archivo: niega mapearlo con escritura
-compartida o con ejecución. El comando `m_fmap` de moon mapea un archivo y muestra
-cada llamada al sistema.
+compartida o con ejecución, también cuando se intenta con `mprotect()`. El comando
+`m_fmap` de moon mapea un archivo y muestra cada llamada al sistema. Requiere Linux,
+gcc, make, sudo y el árbol de compilación del kernel en ejecución.
 
 ```text
-make && make -C kernel
+make && make -C kernel                 # moon y mmap_guard.ko
 sudo insmod kernel/mmap_guard.ko path=/tmp/moon_secret.txt
 ./moon
-m_fmap /tmp/moon_secret.txt r      # lectura compartida: permitida
-m_fmap /tmp/moon_secret.txt w      # escritura compartida: mmap -> -1 EACCES
-sh tests/run_mmap_guard_tests.sh   # ataques, registro y medición
+m_fmap /tmp/moon_secret.txt r          # lectura compartida: permitida
+m_fmap /tmp/moon_secret.txt w          # escritura compartida: mmap -> -1 EACCES
+sh tests/run_mmap_guard_tests.sh       # ataques, registro y contadores
+sh tests/mmap_overhead.sh              # sobrecosto con ftrace y strace
+sh kernel/demo.sh                      # demostración paso a paso
 ```
 
-Los modos son: `r` lectura, `w` escritura compartida, `p` copia privada, `x`
-ejecución y `u` lectura ampliada con `mprotect()`.
+Los modos de `m_fmap` son: `r` lectura, `w` escritura compartida, `p` copia privada,
+`x` ejecución y `u` lectura ampliada con `mprotect()`.
 
 ## Parte I: preguntas diagnósticas
 
-**1. De mmap() al primer fallo de página.** `vm_mmap_pgoff()` llama a
-`security_mmap_file()`. Luego `do_mmap()` crea un `vm_area_struct` con `vm_file` y
-`vm_ops`, sin crear PTE. En el primer acceso, la MMU no encuentra la PTE y lanza
-`#PF`. `handle_mm_fault()` valida `vm_flags`. Después, `filemap_fault()` trae la
-página del page cache e instala la PTE. Desde ahí los accesos no pasan por el
-kernel, así que el control debe hacerse al crear la VMA.
+**1. De mmap() al primer fallo de página.** `mmap()` entra a Ring 0 por `syscall`:
+`ksys_mmap_pgoff()` → `vm_mmap_pgoff()`. Allí `security_mmap_file()` consulta los
+LSM. Con `mmap_lock` tomado, `do_mmap()` calcula `vm_flags` y `mmap_region()` crea un
+`vm_area_struct` con `vm_file`, `vm_pgoff` y los `vm_ops` del sistema de archivos. No
+se crea ninguna PTE. En el primer acceso, la MMU recorre PGD→P4D→PUD→PMD→PTE, no
+encuentra una entrada presente y lanza `#PF` con la dirección en CR2.
+`exc_page_fault()` llama a `handle_mm_fault()`, que valida el acceso contra
+`vm_flags` y llama a `do_fault()`. En una lectura, `filemap_fault()` trae la página
+del page cache, o del disco, e instala una PTE de solo lectura. En una escritura
+privada, `do_cow_fault()` copia la página. En una escritura compartida,
+`do_shared_fault()` avisa al sistema de archivos con `->page_mkwrite`. Desde ahí, los
+accesos no pasan por el kernel. Por eso el control debe hacerse al crear la VMA.
 
-**2. MAP_SHARED frente a MAP_PRIVATE.** `MAP_SHARED` agrega `VM_SHARED`: las PTE
-apuntan a la página del page cache. Las escrituras llegan al disco y otros procesos
-las ven. `MAP_PRIVATE` usa COW: la primera escritura crea una copia anónima del
-proceso. Con un descriptor `O_RDONLY`, el kernel quita `VM_MAYWRITE | VM_SHARED`
-(`mm/mmap.c:464`).
+**2. MAP_SHARED frente a MAP_PRIVATE.** `do_mmap()` traduce `MAP_SHARED` a
+`VM_SHARED | VM_MAYSHARE`: las PTE apuntan a la misma página del page cache que ven
+`read()` y los demás procesos. `MAP_PRIVATE` no lleva `VM_SHARED`: la primera
+escritura hace COW y crea una página anónima del proceso. Con un descriptor
+`O_RDONLY`, el kernel quita `VM_MAYWRITE | VM_SHARED` (`mm/mmap.c:464`), así que el
+mapeo nunca puede pasar a escritura. En seguridad, con `MAP_SHARED` una escritura
+persiste en disco y todos los procesos la ven de inmediato, así que un proceso
+comprometido corrompe los datos de todos. Con `MAP_PRIVATE`, los cambios no persisten
+ni se comparten. Pero la copia queda en memoria anónima del proceso, que puede ir a
+swap o a un volcado de memoria.
 
-**3. Copy-On-Write.** La página empieza compartida y sin permiso de escritura. Al
-escribir, `do_wp_page()` la copia y deja la copia escribible. Si el kernel confunde
-una página COW con una escribible, la escritura llega al archivo. Eso pasó con
-Dirty COW (CVE-2016-5195). Se escribía en `/proc/self/mem` mientras otro hilo
-descartaba la copia con `MADV_DONTNEED`. Así se modificaban archivos de root, como
-`/etc/passwd`.
+**3. Copy-On-Write.** La página empieza compartida con el page cache y con una PTE
+sin escritura, aunque la VMA tenga `VM_WRITE`. La primera escritura lanza `#PF`.
+`do_wp_page()` comprueba que la VMA permite escribir, copia la página a una anónima
+nueva, instala la PTE escribible y suelta la referencia a la original. El peligro
+aparece cuando el kernel concede escritura donde solo hay COW. Pasaría si `mprotect`
+aceptara `PROT_WRITE` sin `VM_MAYWRITE`, o si `get_user_pages()` con `FOLL_FORCE`
+escribiera en la página del page cache en vez de en la copia. Eso fue Dirty COW
+(CVE-2016-5195): se escribía en `/proc/self/mem` mientras otro hilo descartaba la
+copia con `MADV_DONTNEED`. Así, un usuario sin privilegios modificaba archivos de
+solo lectura, como `/etc/passwd` o binarios SUID, y obtenía root.
 
-**4. Tabla de syscalls frente a LSM.** Desde 5.7, `kallsyms_lookup_name` no está
-exportado. Además, CR0.WP está fijado, así que modificar `sys_call_table` es frágil
-e inseguro. El gancho LSM `mmap_file` (antes `file_mmap`) está en el camino de todas
-las rutas, pero el LSM debe compilarse con el kernel. La opción elegida usa
-kretprobes sobre `security_mmap_file()` y `security_file_mprotect()`. Ve lo mismo
-que un LSM y se carga como módulo.
+**4. Tabla de syscalls frente a LSM.** Un LKM con hook en `sys_call_table` se carga
+sin recompilar y ve cada syscall al entrar. Pero `kallsyms_lookup_name()` no está
+exportado desde 5.7, la tabla es de solo lectura y el bit CR0.WP está fijado desde
+5.3. Además, no ve las rutas internas del kernel y lee argumentos crudos de usuario,
+que pueden cambiar después de revisarlos (TOCTOU). Su viabilidad en 6.x es muy baja.
 
-**5. Cifrado transparente.** El descifrado debe estar en el sistema de archivos,
-debajo del page cache, como hace fscrypt en `->read_folio`. Solo quien tiene la
-clave puede abrir el archivo. El aislamiento de tablas de páginas impide que otros
-procesos lean la memoria. Contra ataques físicos se usa cifrado de RAM con
-SME/SEV o TME.
+Un LSM usa los ganchos `mmap_file` (llamado `file_mmap` antes de 3.5) y
+`file_mprotect`. Está en el camino de todas las rutas, recibe `struct file`, `prot` y
+`flags` ya validados, y es la API soportada. Su desventaja es que hay que compilarlo
+con el kernel, porque `security_add_hooks()` es `__init`. BPF LSM evita recompilar,
+pero requiere `bpf` en `lsm=`. Elegí kretprobes sobre `security_mmap_file()` y
+`security_file_mprotect()`: ven lo mismo que un LSM y se cargan como módulo.
+
+**5. Cifrado transparente.** El descifrado va debajo del page cache, en el sistema de
+archivos. fscrypt descifra en `->read_folio` y deja el texto claro en el page cache.
+Al escribir, cifra en una página temporal durante el writeback, sin tocar la página
+en caché. El acceso se controla al abrir el archivo: sin la clave en el keyring no
+se llega al contenido. Otro proceso no puede leer esa página, porque solo aparece en
+las tablas de páginas de quien la mapea, y `/proc/pid/mem` exige
+`ptrace_may_access()`. Al retirar la clave, fscrypt expulsa las páginas en claro.
+Contra la lectura física de la RAM o por DMA se usan cifrado de memoria (AMD SME/SEV,
+Intel TME) e IOMMU.
 
 **6. Páginas sucias y msync.** Escribir por el puntero solo marca sucia la PTE. El
 writeback, `msync()` o `fsync()` las llevan al disco. Un filtro sobre `write()` no
